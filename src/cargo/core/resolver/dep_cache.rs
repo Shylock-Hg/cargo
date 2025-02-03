@@ -9,7 +9,7 @@
 //!
 //! This module impl that cache in all the gory details
 
-use crate::core::resolver::context::Context;
+use crate::core::resolver::context::ResolverContext;
 use crate::core::resolver::errors::describe_path_in_context;
 use crate::core::resolver::types::{ConflictReason, DepInfo, FeaturesSet};
 use crate::core::resolver::{
@@ -21,7 +21,7 @@ use crate::core::{
 };
 use crate::sources::source::QueryKind;
 use crate::util::errors::CargoResult;
-use crate::util::interning::InternedString;
+use crate::util::interning::{InternedString, INTERNED_DEFAULT};
 
 use anyhow::Context as _;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -207,7 +207,6 @@ impl<'a> RegistryQueryer<'a> {
             }
         }
 
-        let first_version = first_version;
         self.version_prefs.sort_summaries(&mut ret, first_version);
 
         let out = Poll::Ready(Rc::new(ret));
@@ -223,7 +222,7 @@ impl<'a> RegistryQueryer<'a> {
     /// next obvious question.
     pub fn build_deps(
         &mut self,
-        cx: &Context,
+        cx: &ResolverContext,
         parent: Option<PackageId>,
         candidate: &Summary,
         opts: &ResolveOpts,
@@ -348,7 +347,7 @@ fn build_requirements<'a, 'b: 'a>(
 
     let handle_default = |uses_default_features, reqs: &mut Requirements<'_>| {
         if uses_default_features && s.features().contains_key("default") {
-            if let Err(e) = reqs.require_feature(InternedString::new("default")) {
+            if let Err(e) = reqs.require_feature(INTERNED_DEFAULT) {
                 return Err(e.into_activate_error(parent, s));
             }
         }

@@ -62,17 +62,17 @@ The package name will be exposed as feature of your crate.")
 The package will be removed from your features.")
                 .conflicts_with("dev")
                 .overrides_with("optional"),
-            flag("public", "Mark the dependency as public")
+            flag("public", "Mark the dependency as public (unstable)")
                 .conflicts_with("dev")
                 .conflicts_with("build")
-                .long_help("Mark the dependency as public
+                .long_help("Mark the dependency as public (unstable)
 
 The dependency can be referenced in your library's public API."),
-            flag("no-public", "Mark the dependency as private")
+            flag("no-public", "Mark the dependency as private (unstable)")
                 .conflicts_with("dev")
                 .conflicts_with("build")
                 .overrides_with("public")
-                .long_help("Mark the dependency as private
+                .long_help("Mark the dependency as private (unstable)
 
 While you can use the crate in your implementation, it cannot be referenced in your public API."),
             clap::Arg::new("rename")
@@ -85,13 +85,11 @@ While you can use the crate in your implementation, it cannot be referenced in y
 Example uses:
 - Depending on multiple versions of a crate
 - Depend on crates with the same name from different registries"),
-            flag(
-                "ignore-rust-version",
-                "Ignore `rust-version` specification in packages (unstable)"
-            ),
         ])
         .arg_manifest_path_without_unsupported_path_tip()
+        .arg_lockfile_path()
         .arg_package("Package to modify")
+        .arg_ignore_rust_version()
         .arg_dry_run("Don't actually write the manifest")
         .arg_silent_suggestion()
         .next_help_heading("Source")
@@ -103,6 +101,12 @@ Example uses:
                 .help("Filesystem path to local crate to add")
                 .group("selected")
                 .conflicts_with("git"),
+            clap::Arg::new("base")
+                .long("base")
+                .action(ArgAction::Set)
+                .value_name("BASE")
+                .help("The path base to use when adding from a local crate (unstable).")
+                .requires("path"),
             clap::Arg::new("git")
                 .long("git")
                 .action(ArgAction::Set)
@@ -140,7 +144,11 @@ This is the catch all, handling hashes to named references in remote repositorie
                 .long("registry")
                 .action(ArgAction::Set)
                 .value_name("NAME")
-                .help("Package registry for this dependency"),
+                .help("Package registry for this dependency")
+                .add(clap_complete::ArgValueCandidates::new(|| {
+                    let candidates = get_registry_candidates();
+                    candidates.unwrap_or_default()
+                })),
         ])
         .next_help_heading("Section")
         .args([
@@ -167,11 +175,11 @@ Build-dependencies are the only dependencies available for use by build scripts 
         ])
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     let dry_run = args.dry_run();
     let section = parse_section(args);
 
-    let ws = args.workspace(config)?;
+    let ws = args.workspace(gctx)?;
 
     if args.is_present_with_zero_values("package") {
         print_available_packages(&ws)?;
@@ -203,21 +211,12 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
         }
     };
 
-    let dependencies = parse_dependencies(config, args)?;
+    let dependencies = parse_dependencies(gctx, args)?;
 
-    let ignore_rust_version = args.flag("ignore-rust-version");
-    if ignore_rust_version && !config.cli_unstable().msrv_policy {
-        return Err(CliError::new(
-            anyhow::format_err!(
-                "`--ignore-rust-version` is unstable; pass `-Zmsrv-policy` to enable support for it"
-            ),
-            101,
-        ));
-    }
-    let honor_rust_version = !ignore_rust_version;
+    let honor_rust_version = args.honor_rust_version();
 
     let options = AddOptions {
-        config,
+        gctx,
         spec,
         dependencies,
         section,
@@ -226,23 +225,22 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     };
     add(&ws, &options)?;
 
-    if !dry_run {
-        // Reload the workspace since we've changed dependencies
-        let ws = args.workspace(config)?;
-        resolve_ws(&ws)?;
-    }
+    // Reload the workspace since we've changed dependencies
+    let ws = args.workspace(gctx)?;
+    resolve_ws(&ws, dry_run)?;
 
     Ok(())
 }
 
-fn parse_dependencies(config: &Config, matches: &ArgMatches) -> CargoResult<Vec<DepOp>> {
+fn parse_dependencies(gctx: &GlobalContext, matches: &ArgMatches) -> CargoResult<Vec<DepOp>> {
     let path = matches.get_one::<String>("path");
+    let base = matches.get_one::<String>("base");
     let git = matches.get_one::<String>("git");
     let branch = matches.get_one::<String>("branch");
     let rev = matches.get_one::<String>("rev");
     let tag = matches.get_one::<String>("tag");
     let rename = matches.get_one::<String>("rename");
-    let registry = match matches.registry(config)? {
+    let registry = match matches.registry(gctx)? {
         Some(reg) if reg == CRATES_IO_REGISTRY => None,
         reg => reg,
     };
@@ -342,6 +340,7 @@ fn parse_dependencies(config: &Config, matches: &ArgMatches) -> CargoResult<Vec<
             public,
             registry: registry.clone(),
             path: path.map(String::from),
+            base: base.map(String::from),
             git: git.map(String::from),
             branch: branch.map(String::from),
             rev: rev.map(String::from),

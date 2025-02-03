@@ -6,11 +6,13 @@ use std::sync::Mutex;
 
 use anyhow::Context as _;
 use cargo_util::{paths, ProcessBuilder, ProcessError};
+use filetime::FileTime;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::core::compiler::apply_env_config;
 use crate::util::interning::InternedString;
-use crate::util::{profile, CargoResult, Config, StableHasher};
+use crate::util::{CargoResult, GlobalContext, StableHasher};
 
 /// Information on the `rustc` executable
 #[derive(Debug)]
@@ -24,9 +26,9 @@ pub struct Rustc {
     pub workspace_wrapper: Option<PathBuf>,
     /// Verbose version information (the output of `rustc -vV`)
     pub verbose_version: String,
-    /// The rustc version (`1.23.4-beta.2`), this comes from verbose_version.
+    /// The rustc version (`1.23.4-beta.2`), this comes from `verbose_version`.
     pub version: semver::Version,
-    /// The host triple (arch-platform-OS), this comes from verbose_version.
+    /// The host triple (arch-platform-OS), this comes from `verbose_version`.
     pub host: InternedString,
     /// The rustc full commit hash, this comes from `verbose_version`.
     pub commit_hash: Option<String>,
@@ -39,26 +41,28 @@ impl Rustc {
     ///
     /// If successful this function returns a description of the compiler along
     /// with a list of its capabilities.
+    #[tracing::instrument(skip(gctx))]
     pub fn new(
         path: PathBuf,
         wrapper: Option<PathBuf>,
         workspace_wrapper: Option<PathBuf>,
         rustup_rustc: &Path,
         cache_location: Option<PathBuf>,
-        config: &Config,
+        gctx: &GlobalContext,
     ) -> CargoResult<Rustc> {
-        let _p = profile::start("Rustc::new");
-
         let mut cache = Cache::load(
             wrapper.as_deref(),
             workspace_wrapper.as_deref(),
             &path,
             rustup_rustc,
             cache_location,
-            config,
+            gctx,
         );
 
-        let mut cmd = ProcessBuilder::new(&path);
+        let mut cmd = ProcessBuilder::new(&path)
+            .wrapped(workspace_wrapper.as_ref())
+            .wrapped(wrapper.as_deref());
+        apply_env_config(gctx, &mut cmd)?;
         cmd.arg("-vV");
         let verbose_version = cache.cached_output(&cmd, 0)?.0;
 
@@ -194,11 +198,11 @@ impl Cache {
         rustc: &Path,
         rustup_rustc: &Path,
         cache_location: Option<PathBuf>,
-        config: &Config,
+        gctx: &GlobalContext,
     ) -> Cache {
         match (
             cache_location,
-            rustc_fingerprint(wrapper, workspace_wrapper, rustc, rustup_rustc, config),
+            rustc_fingerprint(wrapper, workspace_wrapper, rustc, rustup_rustc, gctx),
         ) {
             (Some(cache_location), Ok(rustc_fingerprint)) => {
                 let empty = CacheData {
@@ -318,7 +322,7 @@ fn rustc_fingerprint(
     workspace_wrapper: Option<&Path>,
     rustc: &Path,
     rustup_rustc: &Path,
-    config: &Config,
+    gctx: &GlobalContext,
 ) -> CargoResult<u64> {
     let mut hasher = StableHasher::new();
 
@@ -326,7 +330,13 @@ fn rustc_fingerprint(
         let path = paths::resolve_executable(path)?;
         path.hash(hasher);
 
-        paths::mtime(&path)?.hash(hasher);
+        let meta = paths::metadata(&path)?;
+        meta.len().hash(hasher);
+
+        // Often created and modified are the same, but not all filesystems support the former,
+        // and distro reproducible builds may clamp the latter, so we try to use both.
+        FileTime::from_creation_time(&meta).hash(hasher);
+        FileTime::from_last_modification_time(&meta).hash(hasher);
         Ok(())
     };
 
@@ -352,8 +362,8 @@ fn rustc_fingerprint(
     let maybe_rustup = rustup_rustc == rustc;
     match (
         maybe_rustup,
-        config.get_env("RUSTUP_HOME"),
-        config.get_env("RUSTUP_TOOLCHAIN"),
+        gctx.get_env("RUSTUP_HOME"),
+        gctx.get_env("RUSTUP_TOOLCHAIN"),
     ) {
         (_, Ok(rustup_home), Ok(rustup_toolchain)) => {
             debug!("adding rustup info to rustc fingerprint");
@@ -371,7 +381,7 @@ fn rustc_fingerprint(
         _ => (),
     }
 
-    Ok(hasher.finish())
+    Ok(Hasher::finish(&hasher))
 }
 
 fn process_fingerprint(cmd: &ProcessBuilder, extra_fingerprint: u64) -> u64 {
@@ -381,5 +391,5 @@ fn process_fingerprint(cmd: &ProcessBuilder, extra_fingerprint: u64) -> u64 {
     let mut env = cmd.get_envs().iter().collect::<Vec<_>>();
     env.sort_unstable();
     env.hash(&mut hasher);
-    hasher.finish()
+    Hasher::finish(&hasher)
 }

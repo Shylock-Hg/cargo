@@ -11,7 +11,7 @@ cargo-add --- Add dependencies to a Cargo.toml manifest file
 
 `cargo add` [_options_] _crate_...\
 `cargo add` [_options_] `--path` _path_\
-`cargo add` [_options_] `--git` _url_ [_crate_...]\
+`cargo add` [_options_] `--git` _url_ [_crate_...]
 
 
 ## DESCRIPTION
@@ -63,6 +63,12 @@ Specific commit to use when adding from git.
 [Filesystem path](../reference/specifying-dependencies.html#specifying-path-dependencies) to local crate to add.
 {{/option}}
 
+{{#option "`--base` _base_" }}
+The [path base](../reference/unstable.html#path-bases) to use when adding a local crate.
+
+[Unstable (nightly-only)](../reference/unstable.html#path-bases)
+{{/option}}
+
 {{> options-registry }}
 
 {{/options}}
@@ -107,6 +113,22 @@ Mark the dependency as [optional](../reference/features.html#optional-dependenci
 Mark the dependency as [required](../reference/features.html#optional-dependencies).
 {{/option}}
 
+{{#option "`--public`" }}
+Mark the dependency as public. 
+
+The dependency can be referenced in your library's public API.
+
+[Unstable (nightly-only)](../reference/unstable.html#public-dependency)
+{{/option}}
+
+{{#option "`--no-public`" }}
+Mark the dependency as private. 
+
+While you can use the crate in your implementation, it cannot be referenced in your public API.
+
+[Unstable (nightly-only)](../reference/unstable.html#public-dependency)
+{{/option}}
+
 {{#option "`--no-default-features`" }}
 Disable the [default features](../reference/features.html#dependency-features).
 {{/option}}
@@ -121,15 +143,6 @@ activate](../reference/features.html#dependency-features). When adding multiple
 crates, the features for a specific crate may be enabled with
 `package-name/feature-name` syntax. This flag may be specified multiple times,
 which enables all specified features.
-{{/option}}
-
-{{#option "`--ignore-rust-version`" }}
-Ignore `rust-version` specification in packages.
-
-This option is unstable and available only on the
-[nightly channel](https://doc.rust-lang.org/book/appendix-07-nightly-rust.html)
-and requires the `-Z unstable-options` flag to enable.
-See <https://github.com/rust-lang/cargo/issues/5579> for more information.
 {{/option}}
 
 {{/options}}
@@ -150,7 +163,11 @@ See <https://github.com/rust-lang/cargo/issues/5579> for more information.
 Add dependencies to only the specified package.
 {{/option}}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}

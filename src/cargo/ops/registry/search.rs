@@ -8,20 +8,22 @@ use anyhow::Context as _;
 use url::Url;
 
 use crate::util::style;
+use crate::util::style::LITERAL;
 use crate::util::truncate_with_ellipsis;
 use crate::CargoResult;
-use crate::Config;
+use crate::GlobalContext;
 
 use super::RegistryOrIndex;
 
 pub fn search(
     query: &str,
-    config: &Config,
+    gctx: &GlobalContext,
     reg_or_index: Option<RegistryOrIndex>,
     limit: u32,
 ) -> CargoResult<()> {
-    let (mut registry, source_ids) =
-        super::registry(config, None, reg_or_index.as_ref(), false, None)?;
+    let source_ids = super::get_source_id(gctx, reg_or_index.as_ref())?;
+    let (mut registry, _) =
+        super::registry(gctx, &source_ids, None, reg_or_index.as_ref(), false, None)?;
     let (crates, total_crates) = registry.search(query, limit).with_context(|| {
         format!(
             "failed to retrieve search results from the registry at {}",
@@ -45,10 +47,9 @@ pub fn search(
             .map(|desc| truncate_with_ellipsis(&desc.replace("\n", " "), description_length))
     });
 
-    let mut shell = config.shell();
+    let mut shell = gctx.shell();
     let stdout = shell.out();
-    let good = style::GOOD.render();
-    let reset = anstyle::Reset.render();
+    let good = style::GOOD;
 
     for (name, description) in names.into_iter().zip(descriptions) {
         let line = match description {
@@ -59,7 +60,7 @@ pub fn search(
         while let Some(fragment) = fragments.next() {
             let _ = write!(stdout, "{fragment}");
             if fragments.peek().is_some() {
-                let _ = write!(stdout, "{good}{query}{reset}");
+                let _ = write!(stdout, "{good}{query}{good:#}");
             }
         }
         let _ = writeln!(stdout);
@@ -85,6 +86,13 @@ pub fn search(
             total_crates - limit,
             extra
         );
+    }
+
+    if total_crates > 0 {
+        let literal = LITERAL;
+        shell.note(format_args!(
+            "to learn more about a package, run `{literal}cargo info <name>{literal:#}`",
+        ))?;
     }
 
     Ok(())

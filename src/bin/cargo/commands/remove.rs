@@ -51,15 +51,16 @@ pub fn cli() -> clap::Command {
         ])
         .arg_package("Package to remove from")
         .arg_manifest_path()
+        .arg_lockfile_path()
         .after_help(color_print::cstr!(
             "Run `<cyan,bold>cargo help remove</>` for more detailed information.\n"
         ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     let dry_run = args.dry_run();
 
-    let workspace = args.workspace(config)?;
+    let workspace = args.workspace(gctx)?;
 
     if args.is_present_with_zero_values("package") {
         print_available_packages(&workspace)?;
@@ -100,7 +101,7 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     let section = parse_section(args);
 
     let options = RemoveOptions {
-        config,
+        gctx,
         spec,
         dependencies,
         section,
@@ -113,23 +114,23 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
         gc_workspace(&workspace)?;
 
         // Reload the workspace since we've changed dependencies
-        let ws = args.workspace(config)?;
+        let ws = args.workspace(gctx)?;
         let resolve = {
             // HACK: Avoid unused patch warnings by temporarily changing the verbosity.
             // In rare cases, this might cause index update messages to not show up
-            let verbosity = ws.config().shell().verbosity();
-            ws.config()
+            let verbosity = ws.gctx().shell().verbosity();
+            ws.gctx()
                 .shell()
                 .set_verbosity(cargo::core::Verbosity::Quiet);
-            let resolve = resolve_ws(&ws);
-            ws.config().shell().set_verbosity(verbosity);
+            let resolve = resolve_ws(&ws, dry_run);
+            ws.gctx().shell().set_verbosity(verbosity);
             resolve?.1
         };
 
         // Attempt to gc unused patches and re-resolve if anything is removed
         if gc_unused_patches(&workspace, &resolve)? {
-            let ws = args.workspace(config)?;
-            resolve_ws(&ws)?;
+            let ws = args.workspace(gctx)?;
+            resolve_ws(&ws, dry_run)?;
         }
     }
     Ok(())
@@ -160,38 +161,62 @@ fn parse_section(args: &ArgMatches) -> DepTable {
 /// Clean up the workspace.dependencies, profile, patch, and replace sections of the root manifest
 /// by removing dependencies which no longer have a reference to them.
 fn gc_workspace(workspace: &Workspace<'_>) -> CargoResult<()> {
-    let mut manifest: toml_edit::Document =
-        cargo_util::paths::read(workspace.root_manifest())?.parse()?;
+    let mut workspace_manifest = LocalManifest::try_new(workspace.root_manifest())?;
     let mut is_modified = true;
 
     let members = workspace
         .members()
-        .map(|p| LocalManifest::try_new(p.manifest_path()))
+        .map(|p| {
+            Ok((
+                LocalManifest::try_new(p.manifest_path())?,
+                p.manifest().unstable_features(),
+            ))
+        })
         .collect::<CargoResult<Vec<_>>>()?;
 
     let mut dependencies = members
-        .iter()
-        .flat_map(|manifest| {
-            manifest.get_sections().into_iter().flat_map(|(_, table)| {
-                table
-                    .as_table_like()
-                    .unwrap()
-                    .iter()
-                    .map(|(key, item)| Dependency::from_toml(&manifest.path, key, item))
-                    .collect::<Vec<_>>()
-            })
+        .into_iter()
+        .flat_map(|(member_manifest, unstable_features)| {
+            member_manifest
+                .get_sections()
+                .into_iter()
+                .flat_map(move |(_, table)| {
+                    table
+                        .as_table_like()
+                        .unwrap()
+                        .iter()
+                        .map(|(key, item)| {
+                            Dependency::from_toml(
+                                workspace.gctx(),
+                                workspace.root(),
+                                &member_manifest.path,
+                                &unstable_features,
+                                key,
+                                item,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
         })
         .collect::<CargoResult<Vec<_>>>()?;
 
     // Clean up the workspace.dependencies section and replace instances of
     // workspace dependencies with their definitions
-    if let Some(toml_edit::Item::Table(deps_table)) = manifest
+    if let Some(toml_edit::Item::Table(deps_table)) = workspace_manifest
+        .data
         .get_mut("workspace")
         .and_then(|t| t.get_mut("dependencies"))
     {
         deps_table.set_implicit(true);
         for (key, item) in deps_table.iter_mut() {
-            let ws_dep = Dependency::from_toml(&workspace.root(), key.get(), item)?;
+            let ws_dep = Dependency::from_toml(
+                workspace.gctx(),
+                workspace.root(),
+                &workspace.root(),
+                workspace.unstable_features(),
+                key.get(),
+                item,
+            )?;
 
             // search for uses of this workspace dependency
             let mut is_used = false;
@@ -221,7 +246,9 @@ fn gc_workspace(workspace: &Workspace<'_>) -> CargoResult<()> {
     // Example tables:
     // - profile.dev.package.foo
     // - profile.release.package."foo:2.1.0"
-    if let Some(toml_edit::Item::Table(profile_section_table)) = manifest.get_mut("profile") {
+    if let Some(toml_edit::Item::Table(profile_section_table)) =
+        workspace_manifest.data.get_mut("profile")
+    {
         profile_section_table.set_implicit(true);
 
         for (_, item) in profile_section_table.iter_mut() {
@@ -243,7 +270,7 @@ fn gc_workspace(workspace: &Workspace<'_>) -> CargoResult<()> {
                         if !spec_has_match(
                             &PackageIdSpec::parse(key)?,
                             &dependencies,
-                            workspace.config(),
+                            workspace.gctx(),
                         )? {
                             *item = toml_edit::Item::None;
                             is_modified = true;
@@ -255,14 +282,14 @@ fn gc_workspace(workspace: &Workspace<'_>) -> CargoResult<()> {
     }
 
     // Clean up the replace section
-    if let Some(toml_edit::Item::Table(table)) = manifest.get_mut("replace") {
+    if let Some(toml_edit::Item::Table(table)) = workspace_manifest.data.get_mut("replace") {
         table.set_implicit(true);
 
         for (key, item) in table.iter_mut() {
             if !spec_has_match(
                 &PackageIdSpec::parse(key.get())?,
                 &dependencies,
-                workspace.config(),
+                workspace.gctx(),
             )? {
                 *item = toml_edit::Item::None;
                 is_modified = true;
@@ -271,10 +298,7 @@ fn gc_workspace(workspace: &Workspace<'_>) -> CargoResult<()> {
     }
 
     if is_modified {
-        cargo_util::paths::write_atomic(
-            workspace.root_manifest(),
-            manifest.to_string().as_bytes(),
-        )?;
+        workspace_manifest.write()?;
     }
 
     Ok(())
@@ -284,7 +308,7 @@ fn gc_workspace(workspace: &Workspace<'_>) -> CargoResult<()> {
 fn spec_has_match(
     spec: &PackageIdSpec,
     dependencies: &[Dependency],
-    config: &Config,
+    gctx: &GlobalContext,
 ) -> CargoResult<bool> {
     for dep in dependencies {
         if spec.name() != &dep.name {
@@ -300,7 +324,7 @@ fn spec_has_match(
             continue;
         }
 
-        match dep.source_id(config)? {
+        match dep.source_id(gctx)? {
             MaybeWorkspace::Other(source_id) => {
                 if spec.url().map(|u| u == source_id.url()).unwrap_or(true) {
                     return Ok(true);
@@ -315,12 +339,13 @@ fn spec_has_match(
 
 /// Removes unused patches from the manifest
 fn gc_unused_patches(workspace: &Workspace<'_>, resolve: &Resolve) -> CargoResult<bool> {
-    let mut manifest: toml_edit::Document =
-        cargo_util::paths::read(workspace.root_manifest())?.parse()?;
+    let mut workspace_manifest = LocalManifest::try_new(workspace.root_manifest())?;
     let mut modified = false;
 
     // Clean up the patch section
-    if let Some(toml_edit::Item::Table(patch_section_table)) = manifest.get_mut("patch") {
+    if let Some(toml_edit::Item::Table(patch_section_table)) =
+        workspace_manifest.data.get_mut("patch")
+    {
         patch_section_table.set_implicit(true);
 
         for (_, item) in patch_section_table.iter_mut() {
@@ -328,11 +353,18 @@ fn gc_unused_patches(workspace: &Workspace<'_>, resolve: &Resolve) -> CargoResul
                 patch_table.set_implicit(true);
 
                 for (key, item) in patch_table.iter_mut() {
-                    let dep = Dependency::from_toml(&workspace.root_manifest(), key.get(), item)?;
+                    let dep = Dependency::from_toml(
+                        workspace.gctx(),
+                        workspace.root(),
+                        &workspace.root_manifest(),
+                        workspace.unstable_features(),
+                        key.get(),
+                        item,
+                    )?;
 
                     // Generate a PackageIdSpec url for querying
                     let url = if let MaybeWorkspace::Other(source_id) =
-                        dep.source_id(workspace.config())?
+                        dep.source_id(workspace.gctx())?
                     {
                         format!("{}#{}", source_id.url(), dep.name)
                     } else {
@@ -351,7 +383,7 @@ fn gc_unused_patches(workspace: &Workspace<'_>, resolve: &Resolve) -> CargoResul
     }
 
     if modified {
-        cargo_util::paths::write(workspace.root_manifest(), manifest.to_string().as_bytes())?;
+        workspace_manifest.write()?;
     }
 
     Ok(modified)
