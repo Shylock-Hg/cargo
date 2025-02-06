@@ -18,7 +18,7 @@
 //! type.
 //!
 //! There is a single global [`GlobalCacheTracker`] and
-//! [`DeferredGlobalLastUse`] stored in [`Config`].
+//! [`DeferredGlobalLastUse`] stored in [`GlobalContext`].
 //!
 //! The high-level interface for performing garbage collection is defined in
 //! the [`crate::core::gc`] module. The functions there are responsible for
@@ -121,8 +121,8 @@ use crate::util::cache_lock::CacheLockMode;
 use crate::util::interning::InternedString;
 use crate::util::sqlite::{self, basic_migration, Migration};
 use crate::util::{Filesystem, Progress, ProgressStyle};
-use crate::{CargoResult, Config};
-use anyhow::{bail, Context};
+use crate::{CargoResult, GlobalContext};
+use anyhow::{bail, Context as _};
 use cargo_util::paths;
 use rusqlite::{params, Connection, ErrorCode};
 use std::collections::{hash_map, HashMap};
@@ -346,22 +346,15 @@ impl GlobalCacheTracker {
     ///
     /// The caller is responsible for locking the package cache with
     /// [`CacheLockMode::DownloadExclusive`] before calling this.
-    pub fn new(config: &Config) -> CargoResult<GlobalCacheTracker> {
-        let db_path = Self::db_path(config);
+    pub fn new(gctx: &GlobalContext) -> CargoResult<GlobalCacheTracker> {
+        let db_path = Self::db_path(gctx);
         // A package cache lock is required to ensure only one cargo is
         // accessing at the same time. If there is concurrent access, we
         // want to rely on cargo's own "Blocking" system (which can
         // provide user feedback) rather than blocking inside sqlite
         // (which by default has a short timeout).
-        let db_path =
-            config.assert_package_cache_locked(CacheLockMode::DownloadExclusive, &db_path);
-        let mut conn = if config.cli_unstable().gc {
-            Connection::open(db_path)?
-        } else {
-            // To simplify things (so there aren't checks everywhere for being
-            // enabled), just process everything in memory.
-            Connection::open_in_memory()?
-        };
+        let db_path = gctx.assert_package_cache_locked(CacheLockMode::DownloadExclusive, &db_path);
+        let mut conn = Connection::open(db_path)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         sqlite::migrate(&mut conn, &migrations())?;
         Ok(GlobalCacheTracker {
@@ -371,8 +364,8 @@ impl GlobalCacheTracker {
     }
 
     /// The path to the database.
-    pub fn db_path(config: &Config) -> Filesystem {
-        config.home().join(GLOBAL_CACHE_FILENAME)
+    pub fn db_path(gctx: &GlobalContext) -> Filesystem {
+        gctx.home().join(GLOBAL_CACHE_FILENAME)
     }
 
     /// Given an encoded registry name, returns its ID.
@@ -500,7 +493,7 @@ impl GlobalCacheTracker {
         let mut stmt = self.conn.prepare_cached(
             "SELECT git_db.name, git_checkout.name, git_checkout.size, git_checkout.timestamp
              FROM git_db, git_checkout
-             WHERE git_checkout.registry_id = git_db.id",
+             WHERE git_checkout.git_id = git_db.id",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -550,22 +543,22 @@ impl GlobalCacheTracker {
     /// Deletes files from the global cache based on the given options.
     pub fn clean(&mut self, clean_ctx: &mut CleanContext<'_>, gc_opts: &GcOpts) -> CargoResult<()> {
         self.clean_inner(clean_ctx, gc_opts)
-            .with_context(|| "failed to clean entries from the global cache")
+            .context("failed to clean entries from the global cache")
     }
 
+    #[tracing::instrument(skip_all)]
     fn clean_inner(
         &mut self,
         clean_ctx: &mut CleanContext<'_>,
         gc_opts: &GcOpts,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start("cleaning global cache files");
-        let config = clean_ctx.config;
+        let gctx = clean_ctx.gctx;
         let base = BasePaths {
-            index: config.registry_index_path().into_path_unlocked(),
-            git_db: config.git_db_path().into_path_unlocked(),
-            git_co: config.git_checkouts_path().into_path_unlocked(),
-            crate_dir: config.registry_cache_path().into_path_unlocked(),
-            src: config.registry_source_path().into_path_unlocked(),
+            index: gctx.registry_index_path().into_path_unlocked(),
+            git_db: gctx.git_db_path().into_path_unlocked(),
+            git_co: gctx.git_checkouts_path().into_path_unlocked(),
+            crate_dir: gctx.registry_cache_path().into_path_unlocked(),
+            src: gctx.registry_source_path().into_path_unlocked(),
         };
         let now = now();
         trace!(target: "gc", "cleaning {gc_opts:?}");
@@ -577,12 +570,12 @@ impl GlobalCacheTracker {
             Self::sync_db_with_files(
                 &tx,
                 now,
-                config,
+                gctx,
                 &base,
                 gc_opts.is_download_cache_size_set(),
                 &mut delete_paths,
             )
-            .with_context(|| "failed to sync tracking database")?
+            .context("failed to sync tracking database")?
         }
         if let Some(max_age) = gc_opts.max_index_age {
             let max_age = now - max_age.as_secs();
@@ -664,8 +657,19 @@ impl GlobalCacheTracker {
         Ok(())
     }
 
-    /// Returns a list of directory entries in the given path.
-    fn names_from(path: &Path) -> CargoResult<Vec<String>> {
+    /// Returns a list of directory entries in the given path that are
+    /// themselves directories.
+    fn list_dir_names(path: &Path) -> CargoResult<Vec<String>> {
+        Self::read_dir_with_filter(path, &|entry| {
+            entry.file_type().map_or(false, |ty| ty.is_dir())
+        })
+    }
+
+    /// Returns a list of names in a directory, filtered by the given callback.
+    fn read_dir_with_filter(
+        path: &Path,
+        filter: &dyn Fn(&std::fs::DirEntry) -> bool,
+    ) -> CargoResult<Vec<String>> {
         let entries = match path.read_dir() {
             Ok(e) => e,
             Err(e) => {
@@ -679,7 +683,9 @@ impl GlobalCacheTracker {
             }
         };
         let names = entries
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| filter(entry))
+            .filter_map(|entry| entry.file_name().into_string().ok())
             .collect();
         Ok(names)
     }
@@ -703,15 +709,15 @@ impl GlobalCacheTracker {
     ///
     ///    These orphaned files will be added to `delete_paths` so that the
     ///    caller can delete them.
+    #[tracing::instrument(skip(conn, gctx, base, delete_paths))]
     fn sync_db_with_files(
         conn: &Connection,
         now: Timestamp,
-        config: &Config,
+        gctx: &GlobalContext,
         base: &BasePaths,
         sync_size: bool,
         delete_paths: &mut Vec<PathBuf>,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start("global cache db sync");
         debug!(target: "gc", "starting db sync");
         // For registry_index and git_db, add anything that is missing in the db.
         Self::update_parent_for_missing_from_db(conn, now, REGISTRY_INDEX_TABLE, &base.index)?;
@@ -761,7 +767,7 @@ impl GlobalCacheTracker {
         Self::populate_untracked(
             conn,
             now,
-            config,
+            gctx,
             REGISTRY_INDEX_TABLE,
             "registry_id",
             REGISTRY_SRC_TABLE,
@@ -771,7 +777,7 @@ impl GlobalCacheTracker {
         Self::populate_untracked(
             conn,
             now,
-            config,
+            gctx,
             GIT_DB_TABLE,
             "git_id",
             GIT_CO_TABLE,
@@ -783,7 +789,7 @@ impl GlobalCacheTracker {
         if sync_size {
             Self::update_null_sizes(
                 conn,
-                config,
+                gctx,
                 REGISTRY_INDEX_TABLE,
                 "registry_id",
                 REGISTRY_SRC_TABLE,
@@ -791,7 +797,7 @@ impl GlobalCacheTracker {
             )?;
             Self::update_null_sizes(
                 conn,
-                config,
+                gctx,
                 GIT_DB_TABLE,
                 "git_id",
                 GIT_CO_TABLE,
@@ -802,17 +808,15 @@ impl GlobalCacheTracker {
     }
 
     /// For parent tables, add any entries that are on disk but aren't tracked in the db.
+    #[tracing::instrument(skip(conn, now, base_path))]
     fn update_parent_for_missing_from_db(
         conn: &Connection,
         now: Timestamp,
         parent_table_name: &str,
         base_path: &Path,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start(format!(
-            "update parent db for missing from db {parent_table_name}"
-        ));
         trace!(target: "gc", "checking for untracked parent to add to {parent_table_name}");
-        let names = Self::names_from(base_path)?;
+        let names = Self::list_dir_names(base_path)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "INSERT INTO {parent_table_name} (name, timestamp)
@@ -829,6 +833,7 @@ impl GlobalCacheTracker {
     ///
     /// This could happen for example if the user manually deleted the file or
     /// any such scenario where the filesystem and db are out of sync.
+    #[tracing::instrument(skip(conn, base_path))]
     fn update_db_for_removed(
         conn: &Connection,
         parent_table_name: &str,
@@ -836,7 +841,6 @@ impl GlobalCacheTracker {
         table_name: &str,
         base_path: &Path,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start(format!("update db for removed {table_name}"));
         trace!(target: "gc", "checking for db entries to remove from {table_name}");
         let mut select_stmt = conn.prepare_cached(&format!(
             "SELECT {table_name}.rowid, {parent_table_name}.name, {table_name}.name
@@ -858,6 +862,7 @@ impl GlobalCacheTracker {
     }
 
     /// Removes database entries for any files that are not on disk for the parent tables.
+    #[tracing::instrument(skip(conn, base_path, child_base_paths, delete_paths))]
     fn update_db_parent_for_removed_from_disk(
         conn: &Connection,
         parent_table_name: &str,
@@ -865,9 +870,6 @@ impl GlobalCacheTracker {
         child_base_paths: &[&Path],
         delete_paths: &mut Vec<PathBuf>,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start(format!(
-            "update db parent for removed from disk {parent_table_name}"
-        ));
         trace!(target: "gc", "checking for db entries to remove from {parent_table_name}");
         let mut select_stmt =
             conn.prepare_cached(&format!("SELECT rowid, name FROM {parent_table_name}"))?;
@@ -895,19 +897,19 @@ impl GlobalCacheTracker {
     /// Updates the database to add any `.crate` files that are currently
     /// not tracked (such as when they are downloaded by an older version of
     /// cargo).
+    #[tracing::instrument(skip(conn, now, base_path))]
     fn populate_untracked_crate(
         conn: &Connection,
         now: Timestamp,
         base_path: &Path,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start("populate untracked crate");
         trace!(target: "gc", "populating untracked crate files");
         let mut insert_stmt = conn.prepare_cached(
             "INSERT INTO registry_crate (registry_id, name, size, timestamp)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT DO NOTHING",
         )?;
-        let index_names = Self::names_from(&base_path)?;
+        let index_names = Self::list_dir_names(&base_path)?;
         for index_name in index_names {
             let Some(id) = Self::id_from_name(conn, REGISTRY_INDEX_TABLE, &index_name)? else {
                 // The id is missing from the database. This should be resolved
@@ -915,13 +917,18 @@ impl GlobalCacheTracker {
                 continue;
             };
             let index_path = base_path.join(index_name);
-            for crate_name in Self::names_from(&index_path)? {
-                if crate_name.ends_with(".crate") {
-                    // Missing files should have already been taken care of by
-                    // update_db_for_removed.
-                    let size = paths::metadata(index_path.join(&crate_name))?.len();
-                    insert_stmt.execute(params![id, crate_name, size, now])?;
-                }
+            let crates = Self::read_dir_with_filter(&index_path, &|entry| {
+                entry.file_type().map_or(false, |ty| ty.is_file())
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .map_or(false, |name| name.ends_with(".crate"))
+            })?;
+            for crate_name in crates {
+                // Missing files should have already been taken care of by
+                // update_db_for_removed.
+                let size = paths::metadata(index_path.join(&crate_name))?.len();
+                insert_stmt.execute(params![id, crate_name, size, now])?;
             }
         }
         Ok(())
@@ -929,20 +936,20 @@ impl GlobalCacheTracker {
 
     /// Updates the database to add any files that are currently not tracked
     /// (such as when they are downloaded by an older version of cargo).
+    #[tracing::instrument(skip(conn, now, gctx, base_path, populate_size))]
     fn populate_untracked(
         conn: &Connection,
         now: Timestamp,
-        config: &Config,
+        gctx: &GlobalContext,
         id_table_name: &str,
         id_column_name: &str,
         table_name: &str,
         base_path: &Path,
         populate_size: bool,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start(format!("populate untracked {table_name}"));
         trace!(target: "gc", "populating untracked files for {table_name}");
         // Gather names (and make sure they are in the database).
-        let id_names = Self::names_from(&base_path)?;
+        let id_names = Self::list_dir_names(&base_path)?;
 
         // This SELECT is used to determine if the directory is already
         // tracked. We don't want to do the expensive size computation unless
@@ -956,7 +963,7 @@ impl GlobalCacheTracker {
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT DO NOTHING",
         ))?;
-        let mut progress = Progress::with_style("Scanning", ProgressStyle::Ratio, config);
+        let mut progress = Progress::with_style("Scanning", ProgressStyle::Ratio, gctx);
         // Compute the size of any directory not in the database.
         for id_name in id_names {
             let Some(id) = Self::id_from_name(conn, id_table_name, &id_name)? else {
@@ -965,7 +972,7 @@ impl GlobalCacheTracker {
                 continue;
             };
             let index_path = base_path.join(id_name);
-            let names = Self::names_from(&index_path)?;
+            let names = Self::list_dir_names(&index_path)?;
             let max = names.len();
             for (i, name) in names.iter().enumerate() {
                 if select_stmt.exists(params![id, name])? {
@@ -994,15 +1001,15 @@ impl GlobalCacheTracker {
     /// size.
     ///
     /// `update_db_for_removed` should be called before this is called.
+    #[tracing::instrument(skip(conn, gctx, base_path))]
     fn update_null_sizes(
         conn: &Connection,
-        config: &Config,
+        gctx: &GlobalContext,
         parent_table_name: &str,
         id_column_name: &str,
         table_name: &str,
         base_path: &Path,
     ) -> CargoResult<()> {
-        let _p = crate::util::profile::start(format!("update NULL sizes {table_name}"));
         trace!(target: "gc", "updating NULL size information in {table_name}");
         let mut null_stmt = conn.prepare_cached(&format!(
             "SELECT {table_name}.rowid, {table_name}.name, {parent_table_name}.name
@@ -1012,7 +1019,7 @@ impl GlobalCacheTracker {
         let mut update_stmt = conn.prepare_cached(&format!(
             "UPDATE {table_name} SET size = ?1 WHERE rowid = ?2"
         ))?;
-        let mut progress = Progress::with_style("Scanning", ProgressStyle::Ratio, config);
+        let mut progress = Progress::with_style("Scanning", ProgressStyle::Ratio, gctx);
         let rows: Vec<_> = null_stmt
             .query_map([], |row| {
                 Ok((row.get_unwrap(0), row.get_unwrap(1), row.get_unwrap(2)))
@@ -1031,7 +1038,7 @@ impl GlobalCacheTracker {
         Ok(())
     }
 
-    /// Adds paths to delete from either registry_crate or registry_src whose
+    /// Adds paths to delete from either `registry_crate` or `registry_src` whose
     /// last use is older than the given timestamp.
     fn get_registry_items_to_clean_age(
         conn: &Connection,
@@ -1567,8 +1574,8 @@ impl DeferredGlobalLastUse {
     /// Saves all of the deferred information to the database.
     ///
     /// This will also clear the state of `self`.
+    #[tracing::instrument(skip_all)]
     pub fn save(&mut self, tracker: &mut GlobalCacheTracker) -> CargoResult<()> {
-        let _p = crate::util::profile::start("saving last-use data");
         trace!(target: "gc", "saving last-use data");
         if self.is_empty() {
             return Ok(());
@@ -1589,13 +1596,13 @@ impl DeferredGlobalLastUse {
     /// error.
     ///
     /// This will log or display a warning to the user.
-    pub fn save_no_error(&mut self, config: &Config) {
-        if let Err(e) = self.save_with_config(config) {
+    pub fn save_no_error(&mut self, gctx: &GlobalContext) {
+        if let Err(e) = self.save_with_gctx(gctx) {
             // Because there is an assertion in auto-gc that checks if this is
             // empty, be sure to clear it so that assertion doesn't fail.
             self.clear();
             if !self.save_err_has_warned {
-                if is_silent_error(&e) && config.shell().verbosity() != Verbosity::Verbose {
+                if is_silent_error(&e) && gctx.shell().verbosity() != Verbosity::Verbose {
                     tracing::warn!("failed to save last-use data: {e:?}");
                 } else {
                     crate::display_warning_with_error(
@@ -1604,7 +1611,7 @@ impl DeferredGlobalLastUse {
                         used in its global cache. This information is used for \
                         automatically removing unused data in the cache.",
                         &e,
-                        &mut config.shell(),
+                        &mut gctx.shell(),
                     );
                     self.save_err_has_warned = true;
                 }
@@ -1612,8 +1619,8 @@ impl DeferredGlobalLastUse {
         }
     }
 
-    fn save_with_config(&mut self, config: &Config) -> CargoResult<()> {
-        let mut tracker = config.global_cache_tracker()?;
+    fn save_with_gctx(&mut self, gctx: &GlobalContext) -> CargoResult<()> {
+        let mut tracker = gctx.global_cache_tracker()?;
         self.save(&mut tracker)
     }
 
@@ -1810,7 +1817,8 @@ pub fn is_silent_error(e: &anyhow::Error) -> bool {
 }
 
 /// Returns the disk usage for a git checkout directory.
-pub fn du_git_checkout(path: &Path) -> CargoResult<u64> {
+#[tracing::instrument]
+fn du_git_checkout(path: &Path) -> CargoResult<u64> {
     // !.git is used because clones typically use hardlinks for the git
     // contents. TODO: Verify behavior on Windows.
     // TODO: Or even better, switch to worktrees, and remove this.

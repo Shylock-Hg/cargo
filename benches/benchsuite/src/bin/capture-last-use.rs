@@ -1,7 +1,7 @@
 //! Utility for capturing a global cache last-use database based on the files
 //! on a real-world system.
 //!
-//! This will look in the CARGO_HOME of the current system and record last-use
+//! This will look in the `CARGO_HOME` of the current system and record last-use
 //! data for all files in the cache. This is intended to provide a real-world
 //! example for a benchmark that should be close to what a real set of data
 //! should look like.
@@ -15,8 +15,8 @@
 use cargo::core::global_cache_tracker::{self, DeferredGlobalLastUse, GlobalCacheTracker};
 use cargo::util::cache_lock::CacheLockMode;
 use cargo::util::interning::InternedString;
-use cargo::Config;
-use rand::prelude::SliceRandom;
+use cargo::GlobalContext;
+use rand::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -28,30 +28,29 @@ fn main() {
     let shell = cargo::core::Shell::new();
     let homedir = Path::new(env!("CARGO_MANIFEST_DIR")).join("global-cache-tracker");
     let cwd = homedir.clone();
-    let mut config = Config::new(shell, cwd, homedir.clone());
-    config
-        .configure(
-            0,
-            false,
-            None,
-            false,
-            false,
-            false,
-            &None,
-            &["gc".to_string()],
-            &[],
-        )
-        .unwrap();
-    let db_path = GlobalCacheTracker::db_path(&config).into_path_unlocked();
+    let mut gctx = GlobalContext::new(shell, cwd, homedir.clone());
+    gctx.configure(
+        0,
+        false,
+        None,
+        false,
+        false,
+        false,
+        &None,
+        &["gc".to_string()],
+        &[],
+    )
+    .unwrap();
+    let db_path = GlobalCacheTracker::db_path(&gctx).into_path_unlocked();
     if db_path.exists() {
         fs::remove_file(&db_path).unwrap();
     }
 
-    let _lock = config
+    let _lock = gctx
         .acquire_package_cache_lock(CacheLockMode::DownloadExclusive)
         .unwrap();
     let mut deferred = DeferredGlobalLastUse::new();
-    let mut tracker = GlobalCacheTracker::new(&config).unwrap();
+    let mut tracker = GlobalCacheTracker::new(&gctx).unwrap();
 
     let real_home = cargo::util::homedir(&std::env::current_dir().unwrap()).unwrap();
 
@@ -132,7 +131,7 @@ fn main() {
     let biggest = counts.last().unwrap().1;
 
     src_entries.retain(|src| src.encoded_registry_name == biggest);
-    let mut rng = &mut rand::thread_rng();
+    let mut rng = &mut rand::rng();
     let sample: Vec<_> = src_entries.choose_multiple(&mut rng, 500).collect();
     let mut f = File::create(homedir.join("random-sample")).unwrap();
     for src in sample {

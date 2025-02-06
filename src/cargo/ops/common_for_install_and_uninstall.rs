@@ -8,6 +8,7 @@ use std::task::Poll;
 
 use anyhow::{bail, format_err, Context as _};
 use cargo_util::paths;
+use cargo_util_schemas::core::PartialVersion;
 use ops::FilterRule;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +21,7 @@ use crate::sources::source::Source;
 use crate::sources::PathSource;
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::errors::CargoResult;
-use crate::util::Config;
+use crate::util::GlobalContext;
 use crate::util::{FileLock, Filesystem};
 
 /// On-disk tracking for which package installed which binary.
@@ -97,12 +98,12 @@ pub struct CrateListingV1 {
 }
 
 impl InstallTracker {
-    /// Create an InstallTracker from information on disk.
-    pub fn load(config: &Config, root: &Filesystem) -> CargoResult<InstallTracker> {
+    /// Create an `InstallTracker` from information on disk.
+    pub fn load(gctx: &GlobalContext, root: &Filesystem) -> CargoResult<InstallTracker> {
         let v1_lock =
-            root.open_rw_exclusive_create(Path::new(".crates.toml"), config, "crate metadata")?;
+            root.open_rw_exclusive_create(Path::new(".crates.toml"), gctx, "crate metadata")?;
         let v2_lock =
-            root.open_rw_exclusive_create(Path::new(".crates2.json"), config, "crate metadata")?;
+            root.open_rw_exclusive_create(Path::new(".crates2.json"), gctx, "crate metadata")?;
 
         let v1 = (|| -> CargoResult<_> {
             let mut contents = String::new();
@@ -110,7 +111,7 @@ impl InstallTracker {
             if contents.is_empty() {
                 Ok(CrateListingV1::default())
             } else {
-                Ok(toml::from_str(&contents).with_context(|| "invalid TOML found for metadata")?)
+                Ok(toml::from_str(&contents).context("invalid TOML found for metadata")?)
             }
         })()
         .with_context(|| {
@@ -126,8 +127,7 @@ impl InstallTracker {
             let mut v2 = if contents.is_empty() {
                 CrateListingV2::default()
             } else {
-                serde_json::from_str(&contents)
-                    .with_context(|| "invalid JSON found for metadata")?
+                serde_json::from_str(&contents).context("invalid JSON found for metadata")?
             };
             v2.sync_v1(&v1);
             Ok(v2)
@@ -153,7 +153,7 @@ impl InstallTracker {
     /// Returns a tuple `(freshness, map)`. `freshness` indicates if the
     /// package should be built (`Dirty`) or if it is already up-to-date
     /// (`Fresh`) and should be skipped. The map maps binary names to the
-    /// PackageId that installed it (which is None if not known).
+    /// `PackageId` that installed it (which is `None` if not known).
     ///
     /// If there are no duplicates, then it will be considered `Dirty` (i.e.,
     /// it is OK to build/install).
@@ -175,7 +175,7 @@ impl InstallTracker {
         // Check if any tracked exe's are already installed.
         let duplicates = self.find_duplicates(dst, &exes);
         if force || duplicates.is_empty() {
-            return Ok((Freshness::Dirty(Some(DirtyReason::Forced)), duplicates));
+            return Ok((Freshness::Dirty(DirtyReason::Forced), duplicates));
         }
         // Check if all duplicates come from packages of the same name. If
         // there are duplicates from other packages, then --force will be
@@ -205,7 +205,7 @@ impl InstallTracker {
             let source_id = pkg.package_id().source_id();
             if source_id.is_path() {
                 // `cargo install --path ...` is always rebuilt.
-                return Ok((Freshness::Dirty(Some(DirtyReason::Forced)), duplicates));
+                return Ok((Freshness::Dirty(DirtyReason::Forced), duplicates));
             }
             let is_up_to_date = |dupe_pkg_id| {
                 let info = self
@@ -229,7 +229,7 @@ impl InstallTracker {
             if matching_duplicates.iter().all(is_up_to_date) {
                 Ok((Freshness::Fresh, duplicates))
             } else {
-                Ok((Freshness::Dirty(Some(DirtyReason::Forced)), duplicates))
+                Ok((Freshness::Dirty(DirtyReason::Forced), duplicates))
             }
         } else {
             // Format the error message.
@@ -250,7 +250,7 @@ impl InstallTracker {
     /// Check if any executables are already installed.
     ///
     /// Returns a map of duplicates, the key is the executable name and the
-    /// value is the PackageId that is already installed. The PackageId is
+    /// value is the `PackageId` that is already installed. The `PackageId` is
     /// None if it is an untracked executable.
     fn find_duplicates(
         &self,
@@ -544,32 +544,32 @@ impl InstallInfo {
 }
 
 /// Determines the root directory where installation is done.
-pub fn resolve_root(flag: Option<&str>, config: &Config) -> CargoResult<Filesystem> {
-    let config_root = config.get_path("install.root")?;
+pub fn resolve_root(flag: Option<&str>, gctx: &GlobalContext) -> CargoResult<Filesystem> {
+    let config_root = gctx.get_path("install.root")?;
     Ok(flag
         .map(PathBuf::from)
-        .or_else(|| config.get_env_os("CARGO_INSTALL_ROOT").map(PathBuf::from))
+        .or_else(|| gctx.get_env_os("CARGO_INSTALL_ROOT").map(PathBuf::from))
         .or_else(move || config_root.map(|v| v.val))
         .map(Filesystem::new)
-        .unwrap_or_else(|| config.home().clone()))
+        .unwrap_or_else(|| gctx.home().clone()))
 }
 
 /// Determines the `PathSource` from a `SourceId`.
-pub fn path_source(source_id: SourceId, config: &Config) -> CargoResult<PathSource<'_>> {
+pub fn path_source(source_id: SourceId, gctx: &GlobalContext) -> CargoResult<PathSource<'_>> {
     let path = source_id
         .url()
         .to_file_path()
         .map_err(|()| format_err!("path sources must have a valid path"))?;
-    Ok(PathSource::new(&path, source_id, config))
+    Ok(PathSource::new(&path, source_id, gctx))
 }
 
 /// Gets a Package based on command-line requirements.
 pub fn select_dep_pkg<T>(
     source: &mut T,
     dep: Dependency,
-    config: &Config,
+    gctx: &GlobalContext,
     needs_update: bool,
-    current_rust_version: Option<&semver::Version>,
+    current_rust_version: Option<&PartialVersion>,
 ) -> CargoResult<Package>
 where
     T: Source,
@@ -577,7 +577,7 @@ where
     // This operation may involve updating some sources or making a few queries
     // which may involve frobbing caches, as a result make sure we synchronize
     // with other global Cargos
-    let _lock = config.acquire_package_cache_lock(CacheLockMode::DownloadExclusive)?;
+    let _lock = gctx.acquire_package_cache_lock(CacheLockMode::DownloadExclusive)?;
 
     if needs_update {
         source.invalidate_cache();
@@ -596,8 +596,7 @@ where
     {
         Some(summary) => {
             if let (Some(current), Some(msrv)) = (current_rust_version, summary.rust_version()) {
-                let msrv_req = msrv.to_caret_req();
-                if !msrv_req.matches(current) {
+                if !msrv.is_compatible_with(current) {
                     let name = summary.name();
                     let ver = summary.version();
                     let extra = if dep.source_id().is_registry() {
@@ -616,7 +615,7 @@ where
                             .filter(|summary| {
                                 summary
                                     .rust_version()
-                                    .map(|msrv| msrv.to_caret_req().matches(current))
+                                    .map(|msrv| msrv.is_compatible_with(current))
                                     .unwrap_or(true)
                             })
                             .max_by_key(|s| s.package_id())
@@ -643,7 +642,7 @@ cannot install package `{name} {ver}`, it requires rustc {msrv} or newer, while 
 )
                 }
             }
-            let pkg = Box::new(source).download_now(summary.package_id(), config)?;
+            let pkg = Box::new(source).download_now(summary.package_id(), gctx)?;
             Ok(pkg)
         }
         None => {
@@ -688,8 +687,8 @@ pub fn select_pkg<T, F>(
     source: &mut T,
     dep: Option<Dependency>,
     mut list_all: F,
-    config: &Config,
-    current_rust_version: Option<&semver::Version>,
+    gctx: &GlobalContext,
+    current_rust_version: Option<&PartialVersion>,
 ) -> CargoResult<Package>
 where
     T: Source,
@@ -698,12 +697,12 @@ where
     // This operation may involve updating some sources or making a few queries
     // which may involve frobbing caches, as a result make sure we synchronize
     // with other global Cargos
-    let _lock = config.acquire_package_cache_lock(CacheLockMode::DownloadExclusive)?;
+    let _lock = gctx.acquire_package_cache_lock(CacheLockMode::DownloadExclusive)?;
 
     source.invalidate_cache();
 
     return if let Some(dep) = dep {
-        select_dep_pkg(source, dep, config, false, current_rust_version)
+        select_dep_pkg(source, dep, gctx, false, current_rust_version)
     } else {
         let candidates = list_all(source)?;
         let binaries = candidates
@@ -763,7 +762,7 @@ where
     }
 }
 
-/// Helper to convert features to a BTreeSet.
+/// Helper to convert features to a `BTreeSet`.
 fn feature_set(features: &Rc<BTreeSet<FeatureValue>>) -> BTreeSet<String> {
     features.iter().map(|s| s.to_string()).collect()
 }

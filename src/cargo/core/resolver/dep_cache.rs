@@ -9,7 +9,7 @@
 //!
 //! This module impl that cache in all the gory details
 
-use crate::core::resolver::context::Context;
+use crate::core::resolver::context::ResolverContext;
 use crate::core::resolver::errors::describe_path_in_context;
 use crate::core::resolver::types::{ConflictReason, DepInfo, FeaturesSet};
 use crate::core::resolver::{
@@ -20,11 +20,13 @@ use crate::core::{
     Dependency, FeatureValue, PackageId, PackageIdSpec, PackageIdSpecQuery, Registry, Summary,
 };
 use crate::sources::source::QueryKind;
+use crate::util::closest_msg;
 use crate::util::errors::CargoResult;
-use crate::util::interning::InternedString;
+use crate::util::interning::{InternedString, INTERNED_DEFAULT};
 
 use anyhow::Context as _;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt::Write;
 use std::rc::Rc;
 use std::task::Poll;
 use tracing::debug;
@@ -207,7 +209,6 @@ impl<'a> RegistryQueryer<'a> {
             }
         }
 
-        let first_version = first_version;
         self.version_prefs.sort_summaries(&mut ret, first_version);
 
         let out = Poll::Ready(Rc::new(ret));
@@ -223,7 +224,7 @@ impl<'a> RegistryQueryer<'a> {
     /// next obvious question.
     pub fn build_deps(
         &mut self,
-        cx: &Context,
+        cx: &ResolverContext,
         parent: Option<PackageId>,
         candidate: &Summary,
         opts: &ResolveOpts,
@@ -348,7 +349,7 @@ fn build_requirements<'a, 'b: 'a>(
 
     let handle_default = |uses_default_features, reqs: &mut Requirements<'_>| {
         if uses_default_features && s.features().contains_key("default") {
-            if let Err(e) = reqs.require_feature(InternedString::new("default")) {
+            if let Err(e) = reqs.require_feature(INTERNED_DEFAULT) {
                 return Err(e.into_activate_error(parent, s));
             }
         }
@@ -515,11 +516,20 @@ impl RequirementError {
                     .collect();
                 if deps.is_empty() {
                     return match parent {
-                        None => ActivateError::Fatal(anyhow::format_err!(
-                            "Package `{}` does not have the feature `{}`",
-                            summary.package_id(),
-                            feat
-                        )),
+                        None => {
+                            let closest = closest_msg(
+                                &feat.as_str(),
+                                summary.features().keys(),
+                                |key| &key,
+                                "feature",
+                            );
+                            ActivateError::Fatal(anyhow::format_err!(
+                                "Package `{}` does not have the feature `{}`{}",
+                                summary.package_id(),
+                                feat,
+                                closest
+                            ))
+                        }
                         Some(p) => {
                             ActivateError::Conflict(p, ConflictReason::MissingFeatures(feat))
                         }
@@ -527,13 +537,32 @@ impl RequirementError {
                 }
                 if deps.iter().any(|dep| dep.is_optional()) {
                     match parent {
-                        None => ActivateError::Fatal(anyhow::format_err!(
-                            "Package `{}` does not have feature `{}`. It has an optional dependency \
-                             with that name, but that dependency uses the \"dep:\" \
-                             syntax in the features table, so it does not have an implicit feature with that name.",
-                            summary.package_id(),
-                            feat
-                        )),
+                        None => {
+                            let mut features =
+                                features_enabling_dependency_sorted(summary, feat).peekable();
+                            let mut suggestion = String::new();
+                            if features.peek().is_some() {
+                                suggestion = format!(
+                                    "\nDependency `{}` would be enabled by these features:",
+                                    feat
+                                );
+                                for feature in (&mut features).take(3) {
+                                    let _ = write!(&mut suggestion, "\n\t- `{}`", feature);
+                                }
+                                if features.peek().is_some() {
+                                    suggestion.push_str("\n\t  ...");
+                                }
+                            }
+                            ActivateError::Fatal(anyhow::format_err!(
+                                "\
+Package `{}` does not have feature `{}`. It has an optional dependency \
+with that name, but that dependency uses the \"dep:\" \
+syntax in the features table, so it does not have an implicit feature with that name.{}",
+                                summary.package_id(),
+                                feat,
+                                suggestion
+                            ))
+                        }
                         Some(p) => ActivateError::Conflict(
                             p,
                             ConflictReason::NonImplicitDependencyAsFeature(feat),
@@ -545,7 +574,7 @@ impl RequirementError {
                             "Package `{}` does not have feature `{}`. It has a required dependency \
                              with that name, but only optional dependencies can be used as features.",
                             summary.package_id(),
-                            feat
+                            feat,
                         )),
                         Some(p) => ActivateError::Conflict(
                             p,
@@ -574,4 +603,33 @@ impl RequirementError {
             )),
         }
     }
+}
+
+/// Collect any features which enable the optional dependency "target_dep".
+///
+/// The returned value will be sorted.
+fn features_enabling_dependency_sorted(
+    summary: &Summary,
+    target_dep: InternedString,
+) -> impl Iterator<Item = InternedString> + '_ {
+    let iter = summary
+        .features()
+        .iter()
+        .filter(move |(_, values)| {
+            for value in *values {
+                match value {
+                    FeatureValue::Dep { dep_name }
+                    | FeatureValue::DepFeature {
+                        dep_name,
+                        weak: false,
+                        ..
+                    } if dep_name == &target_dep => return true,
+                    _ => (),
+                }
+            }
+            false
+        })
+        .map(|(name, _)| *name);
+    // iter is already sorted because it was constructed from a BTreeMap.
+    iter
 }

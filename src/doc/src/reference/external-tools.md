@@ -42,6 +42,15 @@ information during the build:
 
 The output goes to stdout in the JSON object per line format. The `reason` field
 distinguishes different kinds of messages.
+The `package_id` field is a unique identifier for referring to the package, and
+as the `--package` argument to many commands. The syntax grammar can be found in
+chapter [Package ID Specifications].
+
+> **Note:** `--message-format=json` only controls Cargo and Rustc's output.
+> This cannot control the output of other tools,
+> e.g. `cargo run --message-format=json`,
+> or arbitrary output from procedural macros.
+> A possible workaround in these situations is to only interpret a line as JSON if it starts with `{`.
 
 The `--message-format` option can also take additional formatting values which
 alter the way the JSON messages are computed and rendered. See the description
@@ -51,8 +60,11 @@ details.
 If you are using Rust, the [cargo_metadata] crate can be used to parse these
 messages.
 
+> **MSRV:** 1.77 is required for `package_id` to be a Package ID Specification. Before that, it was opaque.
+
 [build command documentation]: ../commands/cargo-build.md
 [cargo_metadata]: https://crates.io/crates/cargo_metadata
+[Package ID Specifications]: ./pkgid-spec.md
 
 ### Compiler messages
 
@@ -66,7 +78,7 @@ structure:
     /* The "reason" indicates the kind of message. */
     "reason": "compiler-message",
     /* The Package ID, a unique identifier for referring to the package. */
-    "package_id": "my-package 0.1.0 (path+file:///path/to/my-package)",
+    "package_id": "file:///path/to/my-package#0.1.0",
     /* Absolute path to the package manifest. */
     "manifest_path": "/path/to/my-package/Cargo.toml",
     /* The Cargo target (lib, bin, example, etc.) that generated the message. */
@@ -93,8 +105,10 @@ structure:
         "crate_types": [
             "lib"
         ],
-        /* The name of the target. */
-        "name": "my-package",
+        /* The name of the target.
+           For lib targets, dashes will be replaced with underscores.
+        */
+        "name": "my_package",
         /* Absolute path to the root source file of the target. */
         "src_path": "/path/to/my-package/src/lib.rs",
         /* The Rust edition of the target.
@@ -135,7 +149,7 @@ following structure:
     /* The "reason" indicates the kind of message. */
     "reason": "compiler-artifact",
     /* The Package ID, a unique identifier for referring to the package. */
-    "package_id": "my-package 0.1.0 (path+file:///path/to/my-package)",
+    "package_id": "file:///path/to/my-package#0.1.0",
     /* Absolute path to the package manifest. */
     "manifest_path": "/path/to/my-package/Cargo.toml",
     /* The Cargo target (lib, bin, example, etc.) that generated the artifacts.
@@ -148,7 +162,7 @@ following structure:
         "crate_types": [
             "lib"
         ],
-        "name": "my-package",
+        "name": "my_package",
         "src_path": "/path/to/my-package/src/lib.rs",
         "edition": "2018",
         "doc": true,
@@ -204,7 +218,7 @@ may be found in [the chapter on build scripts](build-scripts.md).
     /* The "reason" indicates the kind of message. */
     "reason": "build-script-executed",
     /* The Package ID, a unique identifier for referring to the package. */
-    "package_id": "my-package 0.1.0 (path+file:///path/to/my-package)",
+    "package_id": "file:///path/to/my-package#0.1.0",
     /* Array of libraries to link, as indicated by the `cargo::rustc-link-lib`
        instruction. Note that this may include a "KIND=" prefix in the string
        where KIND is the library kind.

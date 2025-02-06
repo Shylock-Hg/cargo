@@ -1,11 +1,19 @@
-use std::fmt::{self, Display};
-
+use super::semver_eval_ext;
 use semver::{Comparator, Op, Version, VersionReq};
+use std::fmt::{self, Display};
 
 pub trait VersionExt {
     fn is_prerelease(&self) -> bool;
 
-    fn to_exact_req(&self) -> VersionReq;
+    fn to_req(&self, op: Op) -> VersionReq;
+
+    fn to_exact_req(&self) -> VersionReq {
+        self.to_req(Op::Exact)
+    }
+
+    fn to_caret_req(&self) -> VersionReq {
+        self.to_req(Op::Caret)
+    }
 }
 
 impl VersionExt for Version {
@@ -13,16 +21,26 @@ impl VersionExt for Version {
         !self.pre.is_empty()
     }
 
-    fn to_exact_req(&self) -> VersionReq {
+    fn to_req(&self, op: Op) -> VersionReq {
         VersionReq {
             comparators: vec![Comparator {
-                op: Op::Exact,
+                op,
                 major: self.major,
                 minor: Some(self.minor),
                 patch: Some(self.patch),
                 pre: self.pre.clone(),
             }],
         }
+    }
+}
+
+pub trait VersionReqExt {
+    fn matches_prerelease(&self, version: &Version) -> bool;
+}
+
+impl VersionReqExt for VersionReq {
+    fn matches_prerelease(&self, version: &Version) -> bool {
+        semver_eval_ext::matches_prerelease(self, version)
     }
 }
 
@@ -33,7 +51,11 @@ pub enum OptVersionReq {
     /// The exact locked version and the original version requirement.
     Locked(Version, VersionReq),
     /// The exact requested version and the original version requirement.
-    UpdatePrecise(Version, VersionReq),
+    ///
+    /// This looks identical to [`OptVersionReq::Locked`] but has a different
+    /// meaning, and is used for the `--precise` field of `cargo update`.
+    /// See comments in [`OptVersionReq::matches`] for more.
+    Precise(Version, VersionReq),
 }
 
 impl OptVersionReq {
@@ -51,7 +73,7 @@ impl OptVersionReq {
     pub fn is_exact(&self) -> bool {
         match self {
             OptVersionReq::Any => false,
-            OptVersionReq::Req(req) | OptVersionReq::UpdatePrecise(_, req) => {
+            OptVersionReq::Req(req) | OptVersionReq::Precise(_, req) => {
                 req.comparators.len() == 1 && {
                     let cmp = &req.comparators[0];
                     cmp.op == Op::Exact && cmp.minor.is_some() && cmp.patch.is_some()
@@ -67,19 +89,32 @@ impl OptVersionReq {
         let version = version.clone();
         *self = match self {
             Any => Locked(version, VersionReq::STAR),
-            Req(req) | Locked(_, req) | UpdatePrecise(_, req) => Locked(version, req.clone()),
+            Req(req) | Locked(_, req) | Precise(_, req) => Locked(version, req.clone()),
         };
     }
 
-    pub fn update_precise(&mut self, version: &Version) {
+    /// Makes the requirement precise to the requested version.
+    ///
+    /// This is used for the `--precise` field of `cargo update`.
+    pub fn precise_to(&mut self, version: &Version) {
         use OptVersionReq::*;
         let version = version.clone();
         *self = match self {
-            Any => UpdatePrecise(version, VersionReq::STAR),
-            Req(req) | Locked(_, req) | UpdatePrecise(_, req) => {
-                UpdatePrecise(version, req.clone())
-            }
+            Any => Precise(version, VersionReq::STAR),
+            Req(req) | Locked(_, req) | Precise(_, req) => Precise(version, req.clone()),
         };
+    }
+
+    pub fn is_precise(&self) -> bool {
+        matches!(self, OptVersionReq::Precise(..))
+    }
+
+    /// Gets the version to which this req is precise to, if any.
+    pub fn precise_version(&self) -> Option<&Version> {
+        match self {
+            OptVersionReq::Precise(version, _) => Some(version),
+            _ => None,
+        }
     }
 
     pub fn is_locked(&self) -> bool {
@@ -91,6 +126,16 @@ impl OptVersionReq {
         match self {
             OptVersionReq::Locked(version, _) => Some(version),
             _ => None,
+        }
+    }
+
+    /// Allows to match pre-release in SemVer-Compatible way.
+    /// See [`semver_eval_ext`] for `matches_prerelease` semantics.
+    pub fn matches_prerelease(&self, version: &Version) -> bool {
+        if let OptVersionReq::Req(req) = self {
+            return req.matches_prerelease(version);
+        } else {
+            return self.matches(version);
         }
     }
 
@@ -108,7 +153,7 @@ impl OptVersionReq {
                 // we should not silently use `1.0.0+foo` even though they have the same version.
                 v == version
             }
-            OptVersionReq::UpdatePrecise(v, _) => {
+            OptVersionReq::Precise(v, _) => {
                 // This is used for the `--precise` field of cargo update.
                 //
                 // Unfortunately crates.io allowed versions to differ only
@@ -135,7 +180,7 @@ impl Display for OptVersionReq {
             OptVersionReq::Any => f.write_str("*"),
             OptVersionReq::Req(req)
             | OptVersionReq::Locked(_, req)
-            | OptVersionReq::UpdatePrecise(_, req) => Display::fmt(req, f),
+            | OptVersionReq::Precise(_, req) => Display::fmt(req, f),
         }
     }
 }
@@ -143,5 +188,95 @@ impl Display for OptVersionReq {
 impl From<VersionReq> for OptVersionReq {
     fn from(req: VersionReq) -> Self {
         OptVersionReq::Req(req)
+    }
+}
+
+#[cfg(test)]
+mod matches_prerelease {
+    use semver::VersionReq;
+
+    use super::OptVersionReq;
+    use super::Version;
+
+    #[test]
+    fn prerelease() {
+        // As of the writing, this test is not the final semantic of pre-release
+        // semver matching. Part of the behavior is buggy. This test just tracks
+        // the current behavior of the unstable `--precise <prerelease>`.
+        //
+        // The below transformation proposed in the RFC is hard to implement
+        // outside the semver crate.
+        //
+        // ```
+        // >=1.2.3, <2.0.0 -> >=1.2.3, <2.0.0-0
+        // ```
+        //
+        // The upper bound semantic is also not resolved. So, at least two
+        // outstanding issues are required to be fixed before the stabilization:
+        //
+        // * Bug 1: `x.y.z-pre.0` shouldn't match `x.y.z`.
+        // * Upper bound: Whether `>=x.y.z-0, <x.y.z` should match `x.y.z-0`.
+        //
+        // See the RFC 3493 for the unresolved upper bound issue:
+        // https://rust-lang.github.io/rfcs/3493-precise-pre-release-cargo-update.html#version-ranges-with-pre-release-upper-bounds
+        let cases = [
+            //
+            ("1.2.3", "1.2.3-0", false),
+            ("1.2.3", "1.2.3-1", false),
+            ("1.2.3", "1.2.4-0", true),
+            //
+            (">=1.2.3", "1.2.3-0", false),
+            (">=1.2.3", "1.2.3-1", false),
+            (">=1.2.3", "1.2.4-0", true),
+            //
+            (">1.2.3", "1.2.3-0", false),
+            (">1.2.3", "1.2.3-1", false),
+            (">1.2.3", "1.2.4-0", true),
+            //
+            (">1.2.3, <1.2.4", "1.2.3-0", false),
+            (">1.2.3, <1.2.4", "1.2.3-1", false),
+            (">1.2.3, <1.2.4", "1.2.4-0", false), // upper bound semantic
+            //
+            (">=1.2.3, <1.2.4", "1.2.3-0", false),
+            (">=1.2.3, <1.2.4", "1.2.3-1", false),
+            (">=1.2.3, <1.2.4", "1.2.4-0", false), // upper bound semantic
+            //
+            (">1.2.3, <=1.2.4", "1.2.3-0", false),
+            (">1.2.3, <=1.2.4", "1.2.3-1", false),
+            (">1.2.3, <=1.2.4", "1.2.4-0", true),
+            //
+            (">=1.2.3-0, <1.2.3", "1.2.3-0", true), // upper bound semantic
+            (">=1.2.3-0, <1.2.3", "1.2.3-1", true), // upper bound semantic
+            (">=1.2.3-0, <1.2.3", "1.2.4-0", false),
+            //
+            ("1.2.3", "2.0.0-0", false), // upper bound semantics
+            ("=1.2.3-0", "1.2.3", false),
+            ("=1.2.3-0", "1.2.3-0", true),
+            ("=1.2.3-0", "1.2.4", false),
+            (">=1.2.3-2, <1.2.3-4", "1.2.3-0", false),
+            (">=1.2.3-2, <1.2.3-4", "1.2.3-3", true),
+            (">=1.2.3-2, <1.2.3-4", "1.2.3-5", false), // upper bound semantics
+        ];
+        for (req, ver, expected) in cases {
+            let version_req = req.parse().unwrap();
+            let version = ver.parse().unwrap();
+            let matched = OptVersionReq::Req(version_req).matches_prerelease(&version);
+            assert_eq!(expected, matched, "req: {req}; ver: {ver}");
+        }
+    }
+
+    #[test]
+    fn opt_version_req_matches_prerelease() {
+        let req_ver: VersionReq = "^1.2.3-rc.0".parse().unwrap();
+        let to_ver: Version = "1.2.3-rc.0".parse().unwrap();
+
+        let req = OptVersionReq::Req(req_ver.clone());
+        assert!(req.matches_prerelease(&to_ver));
+
+        let req = OptVersionReq::Locked(to_ver.clone(), req_ver.clone());
+        assert!(req.matches_prerelease(&to_ver));
+
+        let req = OptVersionReq::Precise(to_ver.clone(), req_ver.clone());
+        assert!(req.matches_prerelease(&to_ver));
     }
 }

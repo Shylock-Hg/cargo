@@ -9,16 +9,17 @@ pub fn cli() -> Command {
         .arg_silent_suggestion()
         .arg_target_triple("Fetch dependencies for the target triple")
         .arg_manifest_path()
+        .arg_lockfile_path()
         .after_help(color_print::cstr!(
             "Run `<cyan,bold>cargo help fetch</>` for more detailed information.\n"
         ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let ws = args.workspace(config)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let ws = args.workspace(gctx)?;
 
     let opts = FetchOptions {
-        config,
+        gctx,
         targets: args.targets()?,
     };
     let _ = ops::fetch(&ws, &opts)?;

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::core::Package;
+use crate::core::{Package, PackageIdSpecQuery};
 use crate::core::{PackageIdSpec, Workspace};
 use crate::util::restricted_names::is_glob_pattern;
 use crate::util::CargoResult;
@@ -20,7 +20,8 @@ pub enum Packages {
     /// Opt in all packages.
     ///
     /// As of the time of this writing, it only works on opting in all workspace members.
-    All,
+    /// Keeps the packages passed in to verify that they exist in the workspace.
+    All(Vec<String>),
     /// Opt out of packages passed in.
     ///
     /// As of the time of this writing, it only works on opting out workspace members.
@@ -36,7 +37,7 @@ impl Packages {
             (false, 0, 0) => Packages::Default,
             (false, 0, _) => Packages::Packages(package),
             (false, _, _) => anyhow::bail!("--exclude can only be used together with --workspace"),
-            (true, 0, _) => Packages::All,
+            (true, 0, _) => Packages::All(package),
             (true, _, _) => Packages::OptOut(exclude),
         })
     }
@@ -44,22 +45,32 @@ impl Packages {
     /// Converts selected packages to [`PackageIdSpec`]s.
     pub fn to_package_id_specs(&self, ws: &Workspace<'_>) -> CargoResult<Vec<PackageIdSpec>> {
         let specs = match self {
-            Packages::All => ws
-                .members()
-                .map(Package::package_id)
-                .map(|id| id.to_spec())
-                .collect(),
+            Packages::All(packages) => {
+                emit_packages_not_found_within_workspace(ws, packages)?;
+                ws.members()
+                    .map(Package::package_id)
+                    .map(|id| id.to_spec())
+                    .collect()
+            }
             Packages::OptOut(opt_out) => {
-                let (mut patterns, mut names) = opt_patterns_and_names(opt_out)?;
+                let (mut patterns, mut ids) = opt_patterns_and_ids(opt_out)?;
                 let specs = ws
                     .members()
                     .filter(|pkg| {
-                        !names.remove(pkg.name().as_str()) && !match_patterns(pkg, &mut patterns)
+                        let id = ids.iter().find(|id| id.matches(pkg.package_id())).cloned();
+                        if let Some(id) = &id {
+                            ids.remove(id);
+                        }
+                        !id.is_some() && !match_patterns(pkg, &mut patterns)
                     })
                     .map(Package::package_id)
                     .map(|id| id.to_spec())
                     .collect();
-                let warn = |e| ws.config().shell().warn(e);
+                let warn = |e| ws.gctx().shell().warn(e);
+                let names = ids
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect::<BTreeSet<_>>();
                 emit_package_not_found(ws, names, true).or_else(warn)?;
                 emit_pattern_not_found(ws, patterns, true).or_else(warn)?;
                 specs
@@ -68,11 +79,7 @@ impl Packages {
                 vec![ws.current()?.package_id().to_spec()]
             }
             Packages::Packages(opt_in) => {
-                let (mut patterns, packages) = opt_patterns_and_names(opt_in)?;
-                let mut specs = packages
-                    .iter()
-                    .map(|p| PackageIdSpec::parse(p))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let (mut patterns, mut specs) = opt_patterns_and_ids(opt_in)?;
                 if !patterns.is_empty() {
                     let matched_pkgs = ws
                         .members()
@@ -82,7 +89,7 @@ impl Packages {
                     specs.extend(matched_pkgs);
                 }
                 emit_pattern_not_found(ws, patterns, false)?;
-                specs
+                specs.into_iter().collect()
             }
             Packages::Default => ws
                 .default_members()
@@ -107,27 +114,46 @@ impl Packages {
     pub fn get_packages<'ws>(&self, ws: &'ws Workspace<'_>) -> CargoResult<Vec<&'ws Package>> {
         let packages: Vec<_> = match self {
             Packages::Default => ws.default_members().collect(),
-            Packages::All => ws.members().collect(),
+            Packages::All(packages) => {
+                emit_packages_not_found_within_workspace(ws, packages)?;
+                ws.members().collect()
+            }
             Packages::OptOut(opt_out) => {
-                let (mut patterns, mut names) = opt_patterns_and_names(opt_out)?;
+                let (mut patterns, mut ids) = opt_patterns_and_ids(opt_out)?;
                 let packages = ws
                     .members()
                     .filter(|pkg| {
-                        !names.remove(pkg.name().as_str()) && !match_patterns(pkg, &mut patterns)
+                        let id = ids.iter().find(|id| id.matches(pkg.package_id())).cloned();
+                        if let Some(id) = &id {
+                            ids.remove(id);
+                        }
+                        !id.is_some() && !match_patterns(pkg, &mut patterns)
                     })
                     .collect();
+                let names = ids
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect::<BTreeSet<_>>();
                 emit_package_not_found(ws, names, true)?;
                 emit_pattern_not_found(ws, patterns, true)?;
                 packages
             }
             Packages::Packages(opt_in) => {
-                let (mut patterns, mut names) = opt_patterns_and_names(opt_in)?;
+                let (mut patterns, mut ids) = opt_patterns_and_ids(opt_in)?;
                 let packages = ws
                     .members()
                     .filter(|pkg| {
-                        names.remove(pkg.name().as_str()) || match_patterns(pkg, &mut patterns)
+                        let id = ids.iter().find(|id| id.matches(pkg.package_id())).cloned();
+                        if let Some(id) = &id {
+                            ids.remove(id);
+                        }
+                        id.is_some() || match_patterns(pkg, &mut patterns)
                     })
                     .collect();
+                let names = ids
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect::<BTreeSet<_>>();
                 emit_package_not_found(ws, names, false)?;
                 emit_pattern_not_found(ws, patterns, false)?;
                 packages
@@ -141,7 +167,7 @@ impl Packages {
     pub fn needs_spec_flag(&self, ws: &Workspace<'_>) -> bool {
         match self {
             Packages::Default => ws.default_members().count() > 1,
-            Packages::All => ws.members().count() > 1,
+            Packages::All(_) => ws.members().count() > 1,
             Packages::Packages(_) => true,
             Packages::OptOut(_) => true,
         }
@@ -151,7 +177,7 @@ impl Packages {
 /// Emits "package not found" error.
 fn emit_package_not_found(
     ws: &Workspace<'_>,
-    opt_names: BTreeSet<&str>,
+    opt_names: BTreeSet<String>,
     opt_out: bool,
 ) -> CargoResult<()> {
     if !opt_names.is_empty() {
@@ -187,21 +213,49 @@ fn emit_pattern_not_found(
     Ok(())
 }
 
+fn emit_packages_not_found_within_workspace(
+    ws: &Workspace<'_>,
+    packages: &[String],
+) -> CargoResult<()> {
+    let (mut patterns, mut ids) = opt_patterns_and_ids(packages)?;
+    let _: Vec<_> = ws
+        .members()
+        .filter(|pkg| {
+            let id = ids.iter().find(|id| id.matches(pkg.package_id())).cloned();
+            if let Some(id) = &id {
+                ids.remove(id);
+            }
+            !id.is_some() && !match_patterns(pkg, &mut patterns)
+        })
+        .map(Package::package_id)
+        .map(|id| id.to_spec())
+        .collect();
+    let names = ids
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect::<BTreeSet<_>>();
+    emit_package_not_found(ws, names, false)?;
+    emit_pattern_not_found(ws, patterns, false)?;
+    Ok(())
+}
+
 /// Given a list opt-in or opt-out package selection strings, generates two
-/// collections that represent glob patterns and package names respectively.
-fn opt_patterns_and_names(
+/// collections that represent glob patterns and package id specs respectively.
+fn opt_patterns_and_ids(
     opt: &[String],
-) -> CargoResult<(Vec<(glob::Pattern, bool)>, BTreeSet<&str>)> {
+) -> CargoResult<(Vec<(glob::Pattern, bool)>, BTreeSet<PackageIdSpec>)> {
     let mut opt_patterns = Vec::new();
-    let mut opt_names = BTreeSet::new();
+    let mut opt_ids = BTreeSet::new();
     for x in opt.iter() {
-        if is_glob_pattern(x) {
-            opt_patterns.push((build_glob(x)?, false));
-        } else {
-            opt_names.insert(String::as_str(x));
+        match PackageIdSpec::parse(x) {
+            Ok(spec) => {
+                opt_ids.insert(spec);
+            }
+            Err(_) if is_glob_pattern(x) => opt_patterns.push((build_glob(x)?, false)),
+            Err(e) => return Err(e.into()),
         }
     }
-    Ok((opt_patterns, opt_names))
+    Ok((opt_patterns, opt_ids))
 }
 
 /// Checks whether a package matches any of a list of glob patterns generated

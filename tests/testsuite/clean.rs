@@ -1,7 +1,9 @@
 //! Tests for the `cargo clean` command.
 
-use cargo_test_support::paths::CargoPathExt;
+use cargo_test_support::compare::assert_e2e;
+use cargo_test_support::prelude::*;
 use cargo_test_support::registry::Package;
+use cargo_test_support::str;
 use cargo_test_support::{
     basic_bin_manifest, basic_manifest, git, main_file, project, project_in, rustc_host,
 };
@@ -36,7 +38,10 @@ fn different_dir() {
 
     p.cargo("clean")
         .cwd("src")
-        .with_stderr("[REMOVED] [..]")
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
         .run();
     assert!(!p.build_dir().is_dir());
 }
@@ -50,6 +55,7 @@ fn clean_multiple_packages() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.d1]
@@ -85,7 +91,10 @@ fn clean_multiple_packages() {
 
     p.cargo("clean -p d1 -p d2")
         .cwd("src")
-        .with_stderr("[REMOVED] [..]")
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
         .run();
     assert!(p.bin("foo").is_file());
     assert!(!d1_path.is_file());
@@ -216,6 +225,7 @@ fn clean_release() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -231,17 +241,19 @@ fn clean_release() {
 
     p.cargo("clean -p foo").run();
     p.cargo("build --release")
-        .with_stderr("[FINISHED] [..]")
+        .with_stderr_data(str![[r#"
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     p.cargo("clean -p foo --release").run();
     p.cargo("build --release")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
-[FINISHED] release [optimized] target(s) in [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     p.cargo("build").run();
@@ -261,6 +273,7 @@ fn clean_doc() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -278,7 +291,12 @@ fn clean_doc() {
 
     assert!(doc_path.is_dir());
 
-    p.cargo("clean --doc").with_stderr("[REMOVED] [..]").run();
+    p.cargo("clean --doc")
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
+        .run();
 
     assert!(!doc_path.is_dir());
     assert!(p.build_dir().is_dir());
@@ -293,6 +311,7 @@ fn build_script() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 build = "build.rs"
             "#,
@@ -320,15 +339,14 @@ fn build_script() {
     p.cargo("build").env("FIRST", "1").run();
     p.cargo("clean -p foo").run();
     p.cargo("build -v")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..] build.rs [..]`
-[RUNNING] `[..]build-script-build`
+[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
 [RUNNING] `rustc [..] src/main.rs [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -348,6 +366,7 @@ fn clean_git() {
                     [package]
                     name = "foo"
                     version = "0.0.1"
+                    edition = "2015"
                     authors = []
 
                     [dependencies]
@@ -360,7 +379,12 @@ fn clean_git() {
         .build();
 
     p.cargo("build").run();
-    p.cargo("clean -p dep").with_stderr("[REMOVED] [..]").run();
+    p.cargo("clean -p dep")
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
+        .run();
     p.cargo("build").run();
 }
 
@@ -373,6 +397,7 @@ fn registry() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -385,7 +410,12 @@ fn registry() {
     Package::new("bar", "0.1.0").publish();
 
     p.cargo("build").run();
-    p.cargo("clean -p bar").with_stderr("[REMOVED] [..]").run();
+    p.cargo("clean -p bar")
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
+        .run();
     p.cargo("build").run();
 }
 
@@ -398,6 +428,7 @@ fn clean_verbose() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [dependencies]
                 bar = "0.1"
@@ -411,21 +442,21 @@ fn clean_verbose() {
     p.cargo("build").run();
     let mut expected = String::from(
         "\
-[REMOVING] [..]target/debug/.fingerprint/bar[..]
-[REMOVING] [..]target/debug/deps/libbar[..].rlib
-[REMOVING] [..]target/debug/deps/bar-[..].d
-[REMOVING] [..]target/debug/deps/libbar[..].rmeta
+[REMOVING] [ROOT]/foo/target/debug/.fingerprint/bar-[HASH]
+[REMOVING] [ROOT]/foo/target/debug/deps/libbar-[HASH].rlib
+[REMOVING] [ROOT]/foo/target/debug/deps/bar-[HASH].d
+[REMOVING] [ROOT]/foo/target/debug/deps/libbar-[HASH].rmeta
 ",
     );
     if cfg!(target_os = "macos") {
         // Rust 1.69 has changed so that split-debuginfo=unpacked includes unpacked for rlibs.
-        for obj in p.glob("target/debug/deps/bar-*.o") {
-            expected.push_str(&format!("[REMOVING] [..]{}\n", obj.unwrap().display()));
+        for _ in p.glob("target/debug/deps/bar-*.o") {
+            expected.push_str("[REMOVING] [ROOT]/foo/target/debug/deps/bar-[HASH][..].o\n");
         }
     }
-    expected.push_str("[REMOVED] [..] files, [..] total\n");
+    expected.push_str("[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total\n");
     p.cargo("clean -p bar --verbose")
-        .with_stderr_unordered(&expected)
+        .with_stderr_data(&expected.unordered())
         .run();
     p.cargo("build").run();
 }
@@ -439,6 +470,7 @@ fn clean_remove_rlib_rmeta() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
             "#,
         )
         .file("src/lib.rs", "")
@@ -468,6 +500,7 @@ fn package_cleans_all_the_things() {
                     [package]
                     name = "foo-bar"
                     version = "0.1.0"
+                    edition = "2015"
 
                     [lib]
                     crate-type = ["{}"]
@@ -588,6 +621,7 @@ fn clean_spec_version() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             bar1 = {version="0.1", package="bar"}
@@ -602,21 +636,20 @@ fn clean_spec_version() {
     // Check suggestion for bad pkgid.
     p.cargo("clean -p baz")
         .with_status(101)
-        .with_stderr(
-            "\
-error: package ID specification `baz` did not match any packages
+        .with_stderr_data(str![[r#"
+[ERROR] package ID specification `baz` did not match any packages
 
-<tab>Did you mean `bar`?
-",
-        )
+[HELP] a package with a similar name exists: `bar`
+
+"#]])
         .run();
 
     p.cargo("clean -p bar:0.1.0")
-        .with_stderr(
-            "warning: version qualifier in `-p bar:0.1.0` is ignored, \
-            cleaning all versions of `bar` found\n\
-            [REMOVED] [..] files, [..] total",
-        )
+        .with_stderr_data(str![[r#"
+[WARNING] version qualifier in `-p bar:0.1.0` is ignored, cleaning all versions of `bar` found
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
         .run();
     let mut walker = walkdir::WalkDir::new(p.build_dir())
         .into_iter()
@@ -643,6 +676,7 @@ fn clean_spec_partial_version() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             bar1 = {version="0.1", package="bar"}
@@ -657,21 +691,20 @@ fn clean_spec_partial_version() {
     // Check suggestion for bad pkgid.
     p.cargo("clean -p baz")
         .with_status(101)
-        .with_stderr(
-            "\
-error: package ID specification `baz` did not match any packages
+        .with_stderr_data(str![[r#"
+[ERROR] package ID specification `baz` did not match any packages
 
-<tab>Did you mean `bar`?
-",
-        )
+[HELP] a package with a similar name exists: `bar`
+
+"#]])
         .run();
 
     p.cargo("clean -p bar:0.1")
-        .with_stderr(
-            "warning: version qualifier in `-p bar:0.1` is ignored, \
-            cleaning all versions of `bar` found\n\
-            [REMOVED] [..] files, [..] total",
-        )
+        .with_stderr_data(str![[r#"
+[WARNING] version qualifier in `-p bar:0.1` is ignored, cleaning all versions of `bar` found
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
         .run();
     let mut walker = walkdir::WalkDir::new(p.build_dir())
         .into_iter()
@@ -698,6 +731,7 @@ fn clean_spec_partial_version_ambiguous() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             bar1 = {version="0.1", package="bar"}
@@ -712,21 +746,20 @@ fn clean_spec_partial_version_ambiguous() {
     // Check suggestion for bad pkgid.
     p.cargo("clean -p baz")
         .with_status(101)
-        .with_stderr(
-            "\
-error: package ID specification `baz` did not match any packages
+        .with_stderr_data(str![[r#"
+[ERROR] package ID specification `baz` did not match any packages
 
-<tab>Did you mean `bar`?
-",
-        )
+[HELP] a package with a similar name exists: `bar`
+
+"#]])
         .run();
 
     p.cargo("clean -p bar:0")
-        .with_stderr(
-            "warning: version qualifier in `-p bar:0` is ignored, \
-            cleaning all versions of `bar` found\n\
-            [REMOVED] [..] files, [..] total",
-        )
+        .with_stderr_data(str![[r#"
+[WARNING] version qualifier in `-p bar:0` is ignored, cleaning all versions of `bar` found
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
         .run();
     let mut walker = walkdir::WalkDir::new(p.build_dir())
         .into_iter()
@@ -757,6 +790,7 @@ fn clean_spec_reserved() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = "1.0"
@@ -779,16 +813,15 @@ fn clean_spec_reserved() {
 
     // This should not rebuild bar.
     p.cargo("build -v --all-targets")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [FRESH] bar v1.0.0
-[COMPILING] foo v0.1.0 [..]
-[RUNNING] `rustc [..]
-[RUNNING] `rustc [..]
-[RUNNING] `rustc [..]
-[FINISHED] [..]
-",
-        )
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc [..]`
+[RUNNING] `rustc [..]`
+[RUNNING] `rustc [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -803,6 +836,7 @@ fn clean_dry_run() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = "1.0"
@@ -813,32 +847,38 @@ fn clean_dry_run() {
 
     // Start with no files.
     p.cargo("clean --dry-run")
-        .with_stdout("")
-        .with_stderr(
-            "[SUMMARY] 0 files\n\
-             [WARNING] no files deleted due to --dry-run",
-        )
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[SUMMARY] 0 files
+[WARNING] no files deleted due to --dry-run
+
+"#]])
         .run();
     p.cargo("check").run();
     let before = p.build_dir().ls_r();
     p.cargo("clean --dry-run")
-        .with_stderr(
-            "[SUMMARY] [..] files, [..] total\n\
-             [WARNING] no files deleted due to --dry-run",
-        )
+        .with_stderr_data(str![[r#"
+[SUMMARY] [FILE_NUM] files, [FILE_SIZE]B total
+[WARNING] no files deleted due to --dry-run
+
+"#]])
         .run();
     // Verify it didn't delete anything.
     let after = p.build_dir().ls_r();
     assert_eq!(before, after);
-    let expected = cargo::util::iter_join(before.iter().map(|p| p.to_str().unwrap()), "\n");
+    let mut expected = itertools::join(before.iter().map(|p| p.to_str().unwrap()), "\n");
+    expected.push_str("\n");
+    let expected = snapbox::filter::normalize_paths(&expected);
+    let expected = assert_e2e().redactions().redact(&expected);
     eprintln!("{expected}");
     // Verify the verbose output.
     p.cargo("clean --dry-run -v")
-        .with_stdout_unordered(expected)
-        .with_stderr(
-            "[SUMMARY] [..] files, [..] total\n\
-             [WARNING] no files deleted due to --dry-run",
-        )
+        .with_stdout_data(expected.unordered())
+        .with_stderr_data(str![[r#"
+[SUMMARY] [FILE_NUM] files, [FILE_SIZE]B total
+[WARNING] no files deleted due to --dry-run
+
+"#]])
         .run();
 }
 
@@ -848,7 +888,10 @@ fn doc_with_package_selection() {
     let p = project().file("src/lib.rs", "").build();
     p.cargo("clean --doc -p foo")
         .with_status(101)
-        .with_stderr("error: --doc cannot be used with -p")
+        .with_stderr_data(str![[r#"
+[ERROR] --doc cannot be used with -p
+
+"#]])
         .run();
 }
 
@@ -863,17 +906,16 @@ fn quiet_does_not_show_summary() {
 
     p.cargo("check").run();
     p.cargo("clean --quiet --dry-run")
-        .with_stdout("")
-        .with_stderr("")
+        .with_stdout_data("")
+        .with_stderr_data("")
         .run();
     // Verify exact same command without -q would actually display something.
     p.cargo("clean --dry-run")
-        .with_stdout("")
-        .with_stderr(
-            "\
-[SUMMARY] [..] files, [..] total
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[SUMMARY] [FILE_NUM] files, [FILE_SIZE]B total
 [WARNING] no files deleted due to --dry-run
-",
-        )
+
+"#]])
         .run();
 }

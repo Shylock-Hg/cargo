@@ -1,3 +1,6 @@
+//! > This crate is maintained by the Cargo team for use by the wider
+//! > ecosystem. This crate follows semver compatibility for its APIs.
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -389,7 +392,9 @@ impl Registry {
         self.handle.url(&format!("{}/api/v1{}", self.host, path))?;
         let mut headers = List::new();
         headers.append("Accept: application/json")?;
-        headers.append("Content-Type: application/json")?;
+        if body.is_some() {
+            headers.append("Content-Type: application/json")?;
+        }
 
         if self.auth_required || authorized == Auth::Authorized {
             headers.append(&format!("Authorization: {}", self.token()?))?;

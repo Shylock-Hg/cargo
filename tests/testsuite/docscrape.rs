@@ -1,6 +1,8 @@
 //! Tests for the `cargo doc` command with `-Zrustdoc-scrape-examples`.
 
+use cargo_test_support::prelude::*;
 use cargo_test_support::project;
+use cargo_test_support::str;
 
 #[cargo_test(nightly, reason = "rustdoc scrape examples flags are unstable")]
 fn basic() {
@@ -11,6 +13,7 @@ fn basic() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
@@ -20,24 +23,23 @@ fn basic() {
 
     p.cargo("doc -Zunstable-options -Zrustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr(
-            "\
-[CHECKING] foo v0.0.1 ([CWD])
-[SCRAPING] foo v0.0.1 ([CWD])
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-        )
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]])
         .run();
 
     p.cargo("doc -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr(
-            "[FINISHED] [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-        )
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]])
         .run();
 
     let doc_html = p.read_file("target/doc/foo/fn.foo.html");
@@ -83,6 +85,7 @@ fn main() {
                 [package]
                 name = "a"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
         "#,
         )
@@ -111,14 +114,18 @@ impl Foo {
 
     p.cargo("doc -Zunstable-options -Zrustdoc-scrape-examples --no-deps")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr_unordered(
-            "\
-[CHECKING] a v0.0.1 ([CWD]/crates/a)
-[CHECKING] foo v0.0.1 ([CWD])
-[SCRAPING] foo v0.0.1 ([CWD])
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] [..]
-[GENERATED] [CWD]/target/doc/foo/index.html",
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 1 package to latest compatible version
+[CHECKING] a v0.0.1 ([ROOT]/foo/crates/a)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 
@@ -136,6 +143,7 @@ fn avoid_build_script_cycle() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 links = "foo"
 
@@ -155,6 +163,7 @@ fn avoid_build_script_cycle() {
                 [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 links = "bar"
             "#,
@@ -177,6 +186,7 @@ fn complex_reverse_dependencies() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dev-dependencies]
@@ -195,6 +205,7 @@ fn complex_reverse_dependencies() {
                 [package]
                 name = "a"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [lib]
@@ -214,6 +225,7 @@ fn complex_reverse_dependencies() {
                 [package]
                 name = "b"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
@@ -234,6 +246,7 @@ fn crate_with_dash() {
                 [package]
                 name = "da-sh"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
@@ -258,6 +271,7 @@ fn configure_target() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [lib]
@@ -305,6 +319,7 @@ fn configure_profile_issue_10500() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.dev]
@@ -379,6 +394,7 @@ fn cache() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
@@ -388,25 +404,23 @@ fn cache() {
 
     p.cargo("doc -Zunstable-options -Zrustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr(
-            "\
-[CHECKING] foo v0.0.1 ([CWD])
-[SCRAPING] foo v0.0.1 ([CWD])
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-        )
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]])
         .run();
 
     p.cargo("doc -Zunstable-options -Zrustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr(
-            "\
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-        )
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]])
         .run();
 }
 
@@ -419,6 +433,7 @@ fn no_fail_bad_lib() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
@@ -429,27 +444,26 @@ fn no_fail_bad_lib() {
 
     p.cargo("doc -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr_unordered(
-        "\
-[CHECKING] foo v0.0.1 ([CWD])
-[SCRAPING] foo v0.0.1 ([CWD])
-warning: failed to check lib in package `foo` as a prerequisite for scraping examples from: example \"ex\", example \"ex2\"
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[WARNING] failed to check lib in package `foo` as a prerequisite for scraping examples from: example "ex", example "ex2"
     Try running with `--verbose` to see the error message.
     If an example should not be scanned, then consider adding `doc-scrape-examples = false` to its `[[example]]` definition in Cargo.toml
-warning: `foo` (lib) generated 1 warning
-warning: failed to scan example \"ex\" in package `foo` for example code usage
+[WARNING] `foo` (lib) generated 1 warning
+[WARNING] failed to scan example "ex" in package `foo` for example code usage
     Try running with `--verbose` to see the error message.
     If an example should not be scanned, then consider adding `doc-scrape-examples = false` to its `[[example]]` definition in Cargo.toml
-warning: `foo` (example \"ex\") generated 1 warning
-warning: failed to scan example \"ex2\" in package `foo` for example code usage
+[WARNING] `foo` (example "ex") generated 1 warning
+[WARNING] failed to scan example "ex2" in package `foo` for example code usage
     Try running with `--verbose` to see the error message.
     If an example should not be scanned, then consider adding `doc-scrape-examples = false` to its `[[example]]` definition in Cargo.toml
-warning: `foo` (example \"ex2\") generated 1 warning
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-    )
+[WARNING] `foo` (example "ex2") generated 1 warning
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]].unordered())
         .run();
 }
 
@@ -463,6 +477,7 @@ fn fail_bad_build_script() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
             "#,
         )
         .file("src/lib.rs", "")
@@ -473,14 +488,22 @@ fn fail_bad_build_script() {
     // `cargo doc` fails
     p.cargo("doc")
         .with_status(101)
-        .with_stderr_contains("[..]You shall not pass[..]")
+        .with_stderr_data(str![[r#"
+...
+[..]You shall not pass[..]
+...
+"#]])
         .run();
 
     // scrape examples should fail whenever `cargo doc` fails.
     p.cargo("doc -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
         .with_status(101)
-        .with_stderr_contains("[..]You shall not pass[..]")
+        .with_stderr_data(str![[r#"
+...
+[..]You shall not pass[..]
+...
+"#]])
         .run();
 }
 
@@ -493,6 +516,7 @@ fn no_fail_bad_example() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
@@ -503,43 +527,44 @@ fn no_fail_bad_example() {
 
     p.cargo("doc -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr(
-            "\
-[CHECKING] foo v0.0.1 ([CWD])
-[SCRAPING] foo v0.0.1 ([CWD])
-warning: failed to scan example \"ex1\" in package `foo` for example code usage
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[WARNING] failed to scan example "ex1" in package `foo` for example code usage
     Try running with `--verbose` to see the error message.
     If an example should not be scanned, then consider adding `doc-scrape-examples = false` to its `[[example]]` definition in Cargo.toml
-warning: `foo` (example \"ex1\") generated 1 warning
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-        )
+[WARNING] `foo` (example "ex1") generated 1 warning
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]])
         .run();
 
     p.cargo("clean").run();
 
     p.cargo("doc -v -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr_unordered(
-            "\
-[CHECKING] foo v0.0.1 ([CWD])
+        .with_stderr_data(
+            str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo[..]
-[SCRAPING] foo v0.0.1 ([CWD])
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustdoc[..] --crate-name ex1[..]
 [RUNNING] `rustdoc[..] --crate-name ex2[..]
 [RUNNING] `rustdoc[..] --crate-name foo[..]
-error: expected one of `!` or `::`, found `NOT`
+[ERROR] expected one of `!` or `::`, found `NOT`
  --> examples/ex1.rs:1:6
   |
 1 | DOES NOT COMPILE
   |      ^^^ expected one of `!` or `::`
 
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 
@@ -560,6 +585,7 @@ fn no_scrape_with_dev_deps() {
             [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             authors = []
 
             [dev-dependencies]
@@ -574,6 +600,7 @@ fn no_scrape_with_dev_deps() {
             [package]
             name = "a"
             version = "0.0.1"
+            edition = "2015"
             authors = []
         "#,
         )
@@ -584,31 +611,33 @@ fn no_scrape_with_dev_deps() {
     // should be raised.
     p.cargo("doc -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr(
-            "\
-warning: Rustdoc did not scrape the following examples because they require dev-dependencies: ex
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[WARNING] Rustdoc did not scrape the following examples because they require dev-dependencies: ex
     If you want Rustdoc to scrape these examples, then add `doc-scrape-examples = true`
     to the [[example]] target configuration of at least one example.
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
-        )
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]])
         .run();
 
     // If --examples is provided, then the example is scanned.
     p.cargo("doc --examples -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr_unordered(
-            "\
-[CHECKING] a v0.0.1 ([CWD]/a)
-[CHECKING] foo v0.0.1 ([CWD])
-[DOCUMENTING] a v0.0.1 ([CWD]/a)
-[SCRAPING] foo v0.0.1 ([CWD])
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/ex/index.html
-",
+        .with_stderr_data(
+            str![[r#"
+[CHECKING] a v0.0.1 ([ROOT]/foo/a)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[DOCUMENTING] a v0.0.1 ([ROOT]/foo/a)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/ex/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -622,6 +651,7 @@ fn use_dev_deps_if_explicitly_enabled() {
             [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             authors = []
 
             [[example]]
@@ -640,6 +670,7 @@ fn use_dev_deps_if_explicitly_enabled() {
             [package]
             name = "a"
             version = "0.0.1"
+            edition = "2015"
             authors = []
         "#,
         )
@@ -649,15 +680,18 @@ fn use_dev_deps_if_explicitly_enabled() {
     // If --examples is not provided, then the example is never scanned.
     p.cargo("doc -Zunstable-options -Z rustdoc-scrape-examples")
         .masquerade_as_nightly_cargo(&["rustdoc-scrape-examples"])
-        .with_stderr_unordered(
-            "\
-[CHECKING] foo v0.0.1 ([CWD])
-[CHECKING] a v0.0.1 ([CWD]/a)
-[SCRAPING] foo v0.0.1 ([CWD])
-[DOCUMENTING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[GENERATED] [CWD]/target/doc/foo/index.html
-",
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 1 package to latest compatible version
+[CHECKING] a v0.0.1 ([ROOT]/foo/a)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[SCRAPING] foo v0.0.1 ([ROOT]/foo)
+[DOCUMENTING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [..]
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -673,6 +707,7 @@ fn only_scrape_documented_targets() {
             [package]
             name = "bar"
             version = "0.0.1"
+            edition = "2015"
             authors = []            
 
             [lib]
@@ -694,6 +729,7 @@ fn only_scrape_documented_targets() {
             [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             authors = []      
         "#,
         )
